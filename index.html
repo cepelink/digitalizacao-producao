@@ -1274,13 +1274,47 @@ async function importarDoRecebimento(){
           .sort((a,b)=> ((mapa[a].data||'')+(mapa[a].hora||'')+a).localeCompare((mapa[b].data||'')+(mapa[b].hora||'')+b))
           .map(c=>criarObjetoDoRecebimento(c, mapa[c]));
         if(!novos.length) return null;
-        return {objetos: JSON.stringify([...lista, ...novos])};
+        const saidaTxt = JSON.stringify([...lista, ...novos]);
+        // Cada documento do Firestore aceita no máximo ~1 MB; passou disso a gravação é recusada.
+        if(new Blob([saidaTxt]).size > 1040000) throw new Error('lista de caixas passou do limite de 1 MB do Firestore');
+        return {objetos: saidaTxt};
       });
-  }catch(e){ console.warn('Não foi possível importar do recebimento', e); n = 0; }
+  }catch(e){ console.error('Não foi possível importar do recebimento', e); n = 0; avisarFalhaImportacao(e); }
   importandoRecebimento = false;
   if(n){ await carregarObjetos(); mostrarToast('Novas caixas chegaram do recebimento.'); atualizarTelaAoVivo(); }
   return n;
 }
+let ultimoAvisoImport = 0;
+function avisarFalhaImportacao(e){
+  if(Date.now() - ultimoAvisoImport < 300000) return; // no máx. 1 aviso a cada 5 min
+  ultimoAvisoImport = Date.now();
+  mostrarToast('⚠ Falha ao puxar caixas do recebimento: ' + ((e && (e.code || e.message)) || 'erro desconhecido'));
+}
+/* Diagnóstico: no navegador (F12 → Console) digite  diagnosticoImportacao()  e veja por que uma caixa não entrou. */
+window.diagnosticoImportacao = async function(){
+  const rawMapa = await Armazenar.lerExterno('grd_dados', 'objetosRecebidos');
+  const rawObj  = await Armazenar.get('objetos');
+  const rawIgn  = await Armazenar.get('importacao_ignorados');
+  const mapa = rawMapa ? JSON.parse(rawMapa) : {};
+  const lista = rawObj ? JSON.parse(rawObj) : [];
+  const ign = new Set(rawIgn ? JSON.parse(rawIgn) : []);
+  const existentes = new Set(lista.map(o=>o.codigo));
+  const codigos = Object.keys(mapa);
+  const destProd = codigos.filter(c=>mapa[c] && mapa[c].destino==='Produção');
+  const r = {
+    modo: Armazenar.modo(),
+    objetosNoRecebimento: codigos.length,
+    comDestinoProducao: destProd.length,
+    destinoEnvioDireto: codigos.filter(c=>mapa[c] && mapa[c].destino==='Envio direto').length,
+    destinoADefinir: codigos.filter(c=>!mapa[c] || !['Produção','Envio direto'].includes(mapa[c].destino)).length,
+    jaNaProducao: destProd.filter(c=>existentes.has(c)).length,
+    bloqueadosPorExclusaoAnterior: destProd.filter(c=>!existentes.has(c) && ign.has(c)),
+    pendentesParaImportar: destProd.filter(c=>!existentes.has(c) && !ign.has(c)),
+    tamanhoKB: { objetosRecebidos: Math.round(new Blob([rawMapa||'']).size/1024), objetosProducao: Math.round(new Blob([rawObj||'']).size/1024), limiteFirestoreKB: 1024 }
+  };
+  console.log(r);
+  return r;
+};
 async function ignorarNaImportacao(codigos){
   try{
     const raw = await Armazenar.get('importacao_ignorados');
