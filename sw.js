@@ -1,6 +1,6 @@
 /* Service worker — Controle de Produção CEPE
    Ao publicar uma nova versão do app, troque o número em VERSAO para os aparelhos atualizarem. */
-const VERSAO = 'cepe-producao-v12';
+const VERSAO = 'cepe-producao-v13';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 const HOSTS_FONTES = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 
