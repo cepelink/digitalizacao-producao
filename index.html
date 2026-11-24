@@ -578,6 +578,17 @@
   .rp-table td{padding:8px 10px; border-top:1px solid var(--line); vertical-align:top;}
   .rp-table tfoot td{font-weight:700; background:#F1F7F4; border-top:2px solid var(--line);}
   .rp-mut{color:var(--muted); font-size:11.5px;}
+  .rp-etapa{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:14px; color:var(--jade-dark); margin:16px 0 6px; padding-left:8px; border-left:4px solid var(--jade); break-after:avoid;}
+  .alerta-rapido{background:var(--danger-soft); border:1.5px solid var(--danger); border-radius:12px; padding:14px 16px; margin-bottom:22px;}
+  .alerta-rapido .alerta-titulo{color:var(--danger); font-weight:800; font-size:15px;}
+  .alerta-rapido .alerta-sub{color:var(--danger); font-size:12.5px; margin:2px 0 10px;}
+  .alerta-lista{max-height:320px; overflow:auto; display:flex; flex-direction:column; gap:8px;}
+  .alerta-item{display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:#fff; border:1px solid #F0B4B4; border-left:5px solid var(--danger); border-radius:8px; padding:10px 12px; cursor:pointer;}
+  .alerta-item:hover{border-color:var(--danger);}
+  .alerta-item .al-cx{min-width:110px;}
+  .alerta-item .al-op{flex:1; min-width:140px;}
+  .alerta-item .al-lbl{display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;}
+  .alerta-item .al-dur{color:var(--danger); font-weight:800;}
   .rp-vazio{padding:30px; text-align:center; color:var(--muted); border:1px dashed var(--line); border-radius:12px;}
   @media screen and (max-width:760px){ .rp-stats{grid-template-columns:repeat(2,1fr);} }
   @media print{
@@ -1672,6 +1683,42 @@ async function renderMainGestor(){
   else if(abaAtualGestor==='config') main.innerHTML = await telaConfigGestor();
 }
 
+const LIMITE_ALERTA_MIN = 5;   // lote concluído em menos que isso (minutos) vai para o alerta da gestão
+function lotesRapidos(){
+  const lista = [];
+  cacheObjetos.forEach(o=>{
+    ETAPAS_TRABALHO.forEach(et=>{
+      const d = o[et.k];
+      if(!d || !d.inicio || !d.fim || d.alertaVisto) return;
+      if(new Date(d.fim) - new Date(d.inicio) < LIMITE_ALERTA_MIN*60000) lista.push({o, et, d});
+    });
+  });
+  return lista.sort((a,b)=>new Date(b.d.fim) - new Date(a.d.fim));
+}
+function blocoAlertasRapidos(){
+  const itens = lotesRapidos();
+  if(!itens.length) return '';
+  return `<div class="alerta-rapido">
+    <div class="alerta-titulo">⚠ Lotes finalizados em menos de ${LIMITE_ALERTA_MIN} minutos (${itens.length})</div>
+    <div class="alerta-sub">Confira se a etapa foi realmente executada. Depois de verificar, marque como conferido para tirar da lista.</div>
+    <div class="alerta-lista">${itens.map(({o,et,d})=>`
+      <div class="alerta-item" onclick="abrirDetalheObjeto('${escapeHtml(o.codigo)}')">
+        <span class="al-cx"><span class="al-lbl">Caixa</span><b class="mono">${escapeHtml(o.codigo)}</b></span>
+        <span><span class="al-lbl">Etapa</span><b>${et.nome}</b></span>
+        <span class="al-op"><span class="al-lbl">Operador</span><b>${escapeHtml(d.operador||'—')}</b></span>
+        <span><span class="al-lbl">Tempo</span><span class="al-dur">${fmtDur(d.inicio, d.fim)}</span></span>
+        <span><span class="al-lbl">Término</span>${fmtDataCurta(d.fim)} ${fmtHoraCurta(d.fim)}</span>
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation(); marcarAlertaConferido('${escapeHtml(o.codigo)}','${et.k}')">Conferido</button>
+      </div>`).join('')}</div>
+  </div>`;
+}
+async function marcarAlertaConferido(codigo, campo){
+  await carregarObjetos();
+  const o = cacheObjetos.find(x=>x.codigo===codigo);
+  if(!o || !o[campo]) return;
+  o[campo].alertaVisto = {por: usuarioAtual ? usuarioAtual.nome : 'Gestão', em: nowISO()};
+  if(await salvarObjetos(cacheObjetos)){ mostrarToast('Marcado como conferido.'); renderMainGestor(); }
+}
 function blocoOperadoresAtivos(){
   const ativos = [];
   cacheObjetos.forEach(o=>{
@@ -1703,6 +1750,7 @@ async function telaPainelGestor(){
   const aguardando = total - prontos - emAndamento;
   return `
     <div class="main-head"><div><h2>Painel geral</h2><p>Visão completa de todas as caixas e etapas, com horários registrados automaticamente.</p></div></div>
+    ${blocoAlertasRapidos()}
     <div class="stat-grid">
       <div class="stat-card"><div class="num">${total}</div><div class="lbl">Caixas no sistema</div></div>
       <div class="stat-card"><div class="num">${emAndamento}</div><div class="lbl">Em andamento agora</div></div>
@@ -2460,18 +2508,24 @@ function rpStats(itens){
   return `<div class="rp-stats">${itens.map(i=>`<div class="rp-stat"><div class="n">${i[0]}</div><div class="l">${i[1]}</div></div>`).join('')}</div>`;
 }
 function rpTabelaOperadores(ev){
-  const grupos = agrupar(ev, x=>x.matricula||x.operador);
-  const linhas = Array.from(grupos.entries()).map(([mat, lista])=>{
-    const u = cacheOperadores.find(o=>o.matricula===mat);
-    return {nome: u ? u.nome : lista[0].operador, mat, r: somarEventos(lista)};
-  }).sort((a,b)=>b.r.total-a.r.total);
-  const tot = somarEventos(ev);
-  return `<div class="rp-wrap"><table class="rp-table">
-    <thead><tr><th>Operador</th><th>Preparações</th><th>Capturas</th><th>Imagens capt.</th><th>Inspeções</th><th>Imagens insp.</th><th>Indexações</th><th>Conjuntos</th><th>Total de etapas</th></tr></thead>
-    <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td>
-      <td>${l.r.prep}</td><td>${l.r.cap}</td><td>${l.r.capQtd}</td><td>${l.r.ins}</td><td>${l.r.insQtd}</td><td>${l.r.idx}</td><td>${l.r.idxQtd}</td><td><b>${l.r.total}</b></td></tr>`).join('')}</tbody>
-    <tfoot><tr><td>Total</td><td>${tot.prep}</td><td>${tot.cap}</td><td>${tot.capQtd}</td><td>${tot.ins}</td><td>${tot.insQtd}</td><td>${tot.idx}</td><td>${tot.idxQtd}</td><td>${tot.total}</td></tr></tfoot>
-  </table></div>`;
+  const blocos = ETAPAS_REL.map(e=>{
+    const evE = ev.filter(x=>x.k===e.k);
+    if(!evE.length) return '';
+    const temQ = !!e.q, qlab = rpLabelQtd(e.k);
+    const linhas = Array.from(agrupar(evE, x=>x.matricula||x.operador).entries()).map(([mat, lista])=>{
+      const u = cacheOperadores.find(o=>o.matricula===mat);
+      return {nome: u ? u.nome : lista[0].operador, mat, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size,
+              qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+    }).sort((a,b)=>b.n-a.n);
+    const totQtd = evE.reduce((a,x)=>a+(x.qtd||0),0);
+    return `<div class="rp-etapa">${e.nome} <span class="rp-mut">· ${linhas.length} operador${linhas.length>1?'es':''}</span></div>
+      <div class="rp-wrap"><table class="rp-table">
+      <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo médio</th></tr></thead>
+      <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>Total ${e.nome}</td><td>${evE.length}</td><td>${new Set(evE.map(x=>x.codigo)).size}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(mediaMs(evE))}</td></tr></tfoot>
+      </table></div>`;
+  }).join('');
+  return blocos || '<div class="rp-vazio">Nenhum registro de produção para os filtros escolhidos.</div>';
 }
 function relatorioHTML(cfg){
   const ev = eventosProducao(cfg);
