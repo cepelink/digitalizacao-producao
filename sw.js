@@ -1,39 +1,46 @@
-/* Service worker — Controle de Produção CEPE
-   Ao publicar uma nova versão do app, troque o número em VERSAO para os aparelhos atualizarem. */
-const VERSAO = 'cepe-producao-v13';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
-const HOSTS_FONTES = ['fonts.googleapis.com', 'fonts.gstatic.com'];
+/* Service worker do app de PRODUÇÃO CEPE.
+   - Cache com prefixo próprio ("producao-cepe-"): não mexe nos caches de outros apps do mesmo domínio (ex.: GRD).
+   - Só atende requisições deste app (mesma origem, dentro da pasta do app). Firebase, fontes etc. passam direto. */
+const PREFIXO = 'producao-cepe-';
+const CACHE = PREFIXO + 'v1';
+const ESCOPO = self.registration.scope;          // ex.: https://usuario.github.io/nome-do-repo/
+const ARQUIVOS = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
-self.addEventListener('install', e=>{
-  e.waitUntil(caches.open(VERSAO).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()));
-});
-self.addEventListener('activate', e=>{
+self.addEventListener('install', e => {
   e.waitUntil(
-    caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==VERSAO).map(k=>caches.delete(k))))
-      .then(()=>self.clients.claim())
+    caches.open(CACHE)
+      .then(c => Promise.all(ARQUIVOS.map(a => c.add(a).catch(() => {}))))
+      .then(() => self.skipWaiting())
   );
 });
-self.addEventListener('fetch', e=>{
-  const req = e.request;
-  if(req.method !== 'GET') return;
-  const url = new URL(req.url);
 
-  // Fontes do Google: usa cache e atualiza em segundo plano
-  if(HOSTS_FONTES.includes(url.hostname)){
-    e.respondWith(caches.open(VERSAO).then(async c=>{
-      const guardado = await c.match(req);
-      const rede = fetch(req).then(r=>{ if(r.ok) c.put(req, r.clone()); return r; }).catch(()=>guardado);
-      return guardado || rede;
-    }));
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(nomes => Promise.all(
+        nomes.filter(n => n.startsWith(PREFIXO) && n !== CACHE).map(n => caches.delete(n))   // só apaga os do próprio app
+      ))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET' || !req.url.startsWith(ESCOPO)) return;   // outros apps/domínios: não interceptar
+
+  // Páginas: tenta a rede primeiro (sempre a versão mais nova) e usa o cache se estiver sem internet
+  if (req.mode === 'navigate') {
+    e.respondWith(
+      fetch(req).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put(req, c)); return r; })
+                .catch(() => caches.match(req).then(r => r || caches.match('index.html')))
+    );
     return;
   }
-  // Só o próprio app. Banco de dados (Firebase) nunca passa pelo cache.
-  if(url.origin !== self.location.origin) return;
-
+  // Demais arquivos do app: cache primeiro, atualizando em segundo plano
   e.respondWith(
-    fetch(req).then(r=>{
-      if(r.ok){ const copia = r.clone(); caches.open(VERSAO).then(c=>c.put(req, copia)); }
-      return r;
-    }).catch(()=>caches.match(req).then(r=> r || (req.mode==='navigate' ? caches.match('./index.html') : undefined)))
+    caches.match(req).then(emCache => {
+      const rede = fetch(req).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put(req, c)); return r; }).catch(() => emCache);
+      return emCache || rede;
+    })
   );
 });

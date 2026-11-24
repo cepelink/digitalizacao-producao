@@ -1,33 +1,17 @@
 {
+  "id": "./",
   "name": "Controle de Produção CEPE",
   "short_name": "Produção CEPE",
-  "description": "Controle de produção de caixas por etapas — CEPE",
-  "lang": "pt-BR",
-  "id": "./",
+  "description": "Controle de produção de caixas por etapa — CEPE",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#F1F7F4",
+  "background_color": "#062B22",
   "theme_color": "#062B22",
+  "lang": "pt-BR",
   "icons": [
-    {
-      "src": "icons/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icons/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icons/icon-maskable-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    }
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
   ]
 }
