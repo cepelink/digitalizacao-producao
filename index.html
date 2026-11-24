@@ -141,6 +141,8 @@
   .side-foot{margin-top:auto; padding-top:14px; border-top:1px solid rgba(255,255,255,.1);}
 
   .main{flex:1; padding:28px 34px; overflow-x:hidden; min-width:0;}
+  .dash-frame{display:block; width:100%; height:calc(100vh - 56px); min-height:560px; border:0; border-radius:14px; background:#041F18;}
+  @media (max-width:900px){ .dash-frame{height:calc(100vh - 150px);} }
   .main-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:22px; flex-wrap:wrap; gap:10px;}
   .main-head h2{font-size:24px; margin:0; letter-spacing:-0.01em;}
   .main-head p{color:var(--muted); margin:4px 0 0; font-size:14px;}
@@ -711,6 +713,7 @@
       <div class="side-user" id="g-side-user"><b>Modo gestor</b>Acesso total ao sistema</div>
       <div class="ao-vivo" id="ao-vivo"><i></i> Ao vivo</div>
       <button class="navlink" data-gtab="painel" onclick="irParaAbaGestor('painel')">📊 Painel geral</button>
+      <button class="navlink" data-gtab="dashboard" onclick="irParaAbaGestor('dashboard')">🖥️ Dashboard</button>
       <button class="navlink" data-gtab="producao" onclick="irParaAbaGestor('producao')">📈 Produção por operador</button>
       <button class="navlink" id="nav-g-operadores" data-gtab="operadores" onclick="irParaAbaGestor('operadores')">👤 Usuários</button>
       <button class="navlink" id="nav-g-config" data-gtab="config" onclick="irParaAbaGestor('config')">⚙️ Configurações</button>
@@ -1004,6 +1007,42 @@ function fmtDur(iso1, iso2){
   const h = Math.floor(s/3600); s -= h*3600;
   const m = Math.floor(s/60); s -= m*60;
   return (h?h+'h ':'') + (m?m+'min':(h?'':s+'s'));
+}
+/* ---- Tempo útil: só conta o expediente ----
+   07:30–12:00, 13:00–15:00 e 15:15–16:30 (almoço 12:00–13:00 e lanche 15:00–15:15 não contam).
+   DIAS_UTEIS: 1=segunda … 5=sexta. Inclua 6 se houver expediente aos sábados. */
+const EXPEDIENTE = [[450,720],[780,900],[915,990]]; // minutos desde 00:00
+const DIAS_UTEIS = [1,2,3,4,5];
+function workMs(a, b){
+  a = +new Date(a); b = +new Date(b);
+  if(!(b > a)) return 0;
+  let tot = 0; const d0 = new Date(a); d0.setHours(0,0,0,0);
+  for(let t = +d0; t < b;){
+    if(DIAS_UTEIS.includes(new Date(t).getDay())){
+      for(const [x,y] of EXPEDIENTE){ const u = Math.max(a, t+x*6e4), v = Math.min(b, t+y*6e4); if(v > u) tot += v-u; }
+    }
+    const n = new Date(t); n.setDate(n.getDate()+1); t = +n;
+  }
+  return tot;
+}
+function fmtUtil(iso1, iso2){
+  if(!iso1) return '—';
+  return fmtMs(workMs(iso1, iso2 || new Date()));
+}
+/* Tempo perdido: intervalo (só dentro do expediente) entre o fim de um lote e o início do próximo do mesmo operador.
+   GAP['CODIGO|etapa'] = ms perdidos ANTES de o operador iniciar aquele lote. */
+let GAP = {};
+function calcGaps(){
+  GAP = {}; const m = {};
+  cacheObjetos.forEach(o=>ETAPAS_REL.forEach(e=>{
+    const d = o[e.k]; if(!d || !d.inicio || !d.fim) return;
+    const id = d.matricula || d.operador; if(!id) return;
+    (m[id] = m[id] || []).push({a:+new Date(d.inicio), b:+new Date(d.fim), k:o.codigo+'|'+e.k});
+  }));
+  Object.values(m).forEach(l=>{
+    l.sort((x,y)=>x.a-y.a); let fim = l[0].b;
+    for(let j=1; j<l.length; j++){ if(l[j].a >= fim) GAP[l[j].k] = workMs(fim, l[j].a); fim = Math.max(fim, l[j].b); }
+  });
 }
 function gerarCodigo(existentes){
   let tentativa;
@@ -1517,7 +1556,7 @@ function renderCardAndamento(o, cfg){
     <div class="obj-card" data-codigo="${escapeHtml(o.codigo)}">
       <span class="obj-code">${escapeHtml(o.codigo)}</span>
       <span class="obj-meta">Operador<br><b>${escapeHtml(dados.operador||'—')}</b></span>
-      <span class="obj-meta">Início · duração<br><b>${fmtDT(dados.inicio)}</b> · ${fmtDur(dados.inicio,null)}</span>
+      <span class="obj-meta">Início · duração<br><b>${fmtDT(dados.inicio)}</b> · ${fmtUtil(dados.inicio,null)}</span>
       ${renderEsteira(o.status)}
       <span class="status-pill ${statusPillClass(o.status)}">${INFO_STATUS[o.status].label}</span>
       ${badgeInconformidade(o)}
@@ -1672,12 +1711,20 @@ function irParaAbaGestor(aba){
   });
   renderMainGestor();
 }
+/* ---- Dashboard (aba do gestor): página embutida que se atualiza sozinha a cada 2 minutos ---- */
+const DASHBOARD_HTML = "<!DOCTYPE html>\n<html lang=\"pt-BR\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<meta name=\"theme-color\" content=\"#041F18\">\n<title>Painel de Produ\u00e7\u00e3o CEPE<\/title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link href=\"https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap\" rel=\"stylesheet\">\n<style>\n:root{--bg:#041F18;--panel:#0A2F25;--panel2:#0F3A2E;--line:#17493A;--ink:#E6F5EE;--mute:#8DB5A5;--jade:#2BD48F;\n--c0:#F2B04A;--c1:#2BD48F;--c2:#4CC3E8;--c3:#B79CFF;--danger:#FF7A6B;--r:14px}\n*{box-sizing:border-box}\nhtml,body{margin:0}\nbody{background:radial-gradient(900px 500px at 10% -10%,rgba(43,212,143,.12),transparent 60%),var(--bg);color:var(--ink);font:14px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:100vh;\npadding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}\nh1,h2,.num{font-family:'Space Grotesk',sans-serif}\nbutton,select,input{font:inherit;color:inherit}\nbutton{cursor:pointer}\n:focus-visible{outline:2px solid var(--jade);outline-offset:2px}\n.wrap{max-width:1400px;margin:0 auto;padding:20px clamp(14px,3vw,32px) 60px}\nheader{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;margin-bottom:18px}\nh1{font-size:clamp(20px,3vw,28px);margin:0;letter-spacing:-.02em}\n.sub{color:var(--mute);font-size:13px;margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}\n.dot{width:8px;height:8px;border-radius:50%;background:var(--jade);box-shadow:0 0 0 0 rgba(43,212,143,.6);animation:pulse 2s infinite}\n.dot.demo{background:var(--c0);animation:none}\n@keyframes pulse{70%{box-shadow:0 0 0 8px rgba(43,212,143,0)}100%{box-shadow:0 0 0 0 rgba(43,212,143,0)}}\n.live{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 8px 6px 14px}\n.live small{color:var(--mute)}\n.ring{width:26px;height:26px;transform:rotate(-90deg)}\n.ring circle{fill:none;stroke-width:3}\n.ring .bg{stroke:var(--line)}.ring .fg{stroke:var(--jade);stroke-linecap:round;transition:stroke-dashoffset 1s linear}\n.ib{width:32px;height:32px;border-radius:50%;border:0;background:var(--panel2);display:grid;place-items:center}\n.ib:hover{background:var(--line)}\n.ib.spin svg{animation:spin .8s linear}\n@keyframes spin{to{transform:rotate(360deg)}}\n.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px}\n.seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}\n.seg button{border:0;background:none;padding:6px 12px;border-radius:7px;color:var(--mute);font-weight:500}\n.seg button.on{background:var(--jade);color:#04251B;font-weight:600}\nselect,input[type=search]{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:0}\nselect option{background:var(--panel)}\ninput[type=search]{flex:1;min-width:160px;max-width:300px}\n.chip{display:inline-flex;gap:6px;align-items:center;background:var(--panel2);border:1px solid var(--jade);border-radius:999px;padding:3px 6px 3px 12px;font-size:13px}\n.chip button{border:0;background:rgba(255,255,255,.1);border-radius:50%;width:20px;height:20px;line-height:1}\n.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}\n.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px}\n.kpi .l{color:var(--mute);font-size:13px}\n.kpi .num{font-size:32px;font-weight:600;line-height:1.15;margin:4px 0;letter-spacing:-.02em}\n.d{font-size:12.5px;font-weight:500}.d.up{color:var(--jade)}.d.dn{color:var(--danger)}.d.eq{color:var(--mute)}\n.pipe{display:grid;grid-template-columns:repeat(5,1fr);gap:0;margin-bottom:16px;padding:6px}\n.stg{position:relative;text-align:left;border:1.5px solid transparent;background:none;border-radius:11px;padding:12px 14px}\n.stg:hover{background:var(--panel2)}\n.stg.on{border-color:var(--jade);background:var(--panel2)}\n.stg:not(:last-child)::after{content:\"\";position:absolute;right:-1px;top:50%;width:8px;height:8px;border-top:2px solid var(--line);border-right:2px solid var(--line);transform:translate(0,-50%) rotate(45deg)}\n.stg .n{display:flex;align-items:center;gap:7px;color:var(--mute);font-size:13px}\n.stg .n i{width:9px;height:9px;border-radius:3px}\n.stg .num{font-size:30px;font-weight:600}\n.stg .s{font-size:12.5px;color:var(--mute)}\n.stg .s b{color:var(--ink);font-weight:600}\n.grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:12px;margin-bottom:16px}\n.card h2{font-size:16px;margin:0}\n.ch{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}\n.leg{display:flex;gap:6px;flex-wrap:wrap}\n.leg button{border:1px solid var(--line);background:none;border-radius:999px;padding:3px 10px;font-size:12.5px;display:flex;gap:6px;align-items:center}\n.leg button i{width:8px;height:8px;border-radius:50%}\n.leg button.off{opacity:.4;text-decoration:line-through}\n.chart{position:relative}\n.chart svg{width:100%;height:auto;display:block}\n.chart text{fill:var(--mute);font-size:11px}\n.tip{position:absolute;pointer-events:none;background:#031712;border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:12.5px;white-space:nowrap;opacity:0;transition:opacity .1s;z-index:3}\n.tip b{display:block;margin-bottom:3px}\n.tip i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}\n.op{display:block;width:100%;text-align:left;border:1.5px solid transparent;background:none;border-radius:10px;padding:8px 10px;margin-bottom:2px}\n.op:hover{background:var(--panel2)}.op.on{border-color:var(--jade);background:var(--panel2)}\n.op .t{display:flex;justify-content:space-between;gap:8px;font-weight:500}\n.op .t span{color:var(--mute);font-weight:400}\n.tm{display:flex;justify-content:space-between;gap:8px;font-size:12.5px;color:var(--mute);margin-top:2px}.tm .lost{color:var(--c0)}\n.bar{display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--line);margin-top:6px}\n.empty{color:var(--mute);padding:24px 0;text-align:center}\n.tw{overflow-x:auto}\ntable{width:100%;border-collapse:collapse;min-width:720px}\nth{text-align:left;color:var(--mute);font-weight:500;font-size:12.5px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}\nth button{border:0;background:none;padding:0;color:inherit;font-weight:inherit}\nth button:hover{color:var(--ink)}\ntd{padding:10px;border-bottom:1px solid rgba(23,73,58,.6)}\ntbody tr{cursor:pointer}tbody tr:hover td{background:var(--panel2)}\n.cod{font-family:'Space Grotesk';font-weight:600}\n.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 10px;font-size:12.5px;font-weight:500;white-space:nowrap}\n.pill.espera{background:rgba(242,176,74,.14);color:var(--c0)}\n.pill.ativo{background:rgba(43,212,143,.15);color:var(--jade)}\n.pill.pronto{background:rgba(76,195,232,.15);color:var(--c2)}\n.pill.ativo::before{content:\"\";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.6s infinite}\n.prog{display:flex;gap:3px;width:110px}\n.prog i{flex:1;height:7px;border-radius:3px;background:var(--line)}\n.prog i.f{background:var(--jade)}.prog i.a{background:var(--c0);animation:blink 1.4s infinite}\n@keyframes blink{50%{opacity:.35}}\n.more{display:block;margin:12px auto 0;border:1px solid var(--line);background:none;border-radius:10px;padding:7px 16px}\n.more:hover{background:var(--panel2)}\n.scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .2s;z-index:10}\n.scrim.on{opacity:1;pointer-events:auto}\naside{position:fixed;top:0;right:0;bottom:0;width:min(440px,100%);background:var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .25s;z-index:11;overflow:auto;padding:22px 20px calc(30px + env(safe-area-inset-bottom))}\naside.on{transform:none}\naside h2{font-size:22px;margin:0 0 2px}\n.tl{margin:18px 0 0;padding:0;list-style:none}\n.tl li{position:relative;padding:0 0 18px 26px;border-left:2px solid var(--line);margin-left:6px}\n.tl li::before{content:\"\";position:absolute;left:-7px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--bg);border:2px solid var(--line)}\n.tl li.f::before{background:var(--jade);border-color:var(--jade)}.tl li.a::before{border-color:var(--c0);background:var(--c0)}\n.tl b{display:block}.tl small{color:var(--mute);display:block}\n.obs{margin-top:4px;background:rgba(255,122,107,.12);color:var(--danger);border-radius:8px;padding:6px 9px;font-size:13px}\n.x{position:absolute;top:16px;right:16px}\n.banner{background:rgba(242,176,74,.12);border:1px solid var(--c0);color:var(--c0);border-radius:12px;padding:10px 14px;margin-bottom:14px;font-size:13px}\n.flash{animation:fl .8s}@keyframes fl{from{background:rgba(43,212,143,.25)}}\n@media(max-width:900px){.grid{grid-template-columns:1fr}.pipe{grid-template-columns:repeat(2,1fr)}.stg::after{display:none}}\n@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}\n<\/style>\n<\/head>\n<body>\n<div class=\"wrap\">\n  <header>\n    <div>\n      <h1>Painel de Produ\u00e7\u00e3o CEPE<\/h1>\n      <div class=\"sub\"><span class=\"dot\" id=\"dot\"><\/span><span id=\"src\">Conectando\u2026<\/span><span id=\"upd\"><\/span><\/div>\n    <\/div>\n    <div class=\"live\" title=\"Atualiza\u00e7\u00e3o autom\u00e1tica a cada 2 minutos\">\n      <small id=\"cd\">2:00<\/small>\n      <svg class=\"ring\" viewBox=\"0 0 26 26\"><circle class=\"bg\" cx=\"13\" cy=\"13\" r=\"10\"/><circle class=\"fg\" id=\"fg\" cx=\"13\" cy=\"13\" r=\"10\" stroke-dasharray=\"62.8\" stroke-dashoffset=\"0\"/><\/svg>\n      <button class=\"ib\" data-a=\"auto\" id=\"bAuto\" aria-label=\"Pausar atualiza\u00e7\u00e3o autom\u00e1tica\" title=\"Pausar/retomar\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><rect x=\"3\" y=\"2\" width=\"3\" height=\"10\"/><rect x=\"8\" y=\"2\" width=\"3\" height=\"10\"/><\/svg><\/button>\n      <button class=\"ib\" data-a=\"refresh\" id=\"bRef\" aria-label=\"Atualizar agora\" title=\"Atualizar agora\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.4\" stroke-linecap=\"round\"><path d=\"M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5\"/><\/svg><\/button>\n    <\/div>\n  <\/header>\n  <div id=\"banner\"><\/div>\n  <div class=\"filters\">\n    <div class=\"seg\" id=\"segDias\"><button data-a=\"dias\" data-v=\"7\">7 dias<\/button><button data-a=\"dias\" data-v=\"30\" class=\"on\">30 dias<\/button><button data-a=\"dias\" data-v=\"90\">90 dias<\/button><\/div>\n    <select id=\"selCli\" aria-label=\"Cliente\"><option value=\"\">Todos os clientes<\/option><\/select>\n    <input type=\"search\" id=\"q\" placeholder=\"Buscar caixa ou cliente\" aria-label=\"Buscar\">\n    <span id=\"chips\"><\/span>\n  <\/div>\n  <section class=\"kpis\" id=\"kpis\"><\/section>\n  <section class=\"card pipe\" id=\"pipe\"><\/section>\n  <section class=\"grid\">\n    <div class=\"card\">\n      <div class=\"ch\"><h2>Produ\u00e7\u00e3o por dia<\/h2>\n        <div style=\"display:flex;gap:10px;flex-wrap:wrap\"><div class=\"seg\" id=\"segMet\"><button data-a=\"met\" data-v=\"n\" class=\"on\">Etapas<\/button><button data-a=\"met\" data-v=\"vol\">Volume<\/button><\/div><div class=\"leg\" id=\"leg\"><\/div><\/div>\n      <\/div>\n      <div class=\"chart\" id=\"chart\"><\/div>\n    <\/div>\n    <div class=\"card\"><div class=\"ch\"><h2>Operadores<\/h2><span class=\"sub\" style=\"margin:0\">clique para filtrar<\/span><\/div><div id=\"ops\"><\/div><\/div>\n  <\/section>\n  <section class=\"card\">\n    <div class=\"ch\"><h2>Caixas<\/h2><span class=\"sub\" style=\"margin:0\" id=\"tcount\"><\/span><\/div>\n    <div class=\"tw\"><table><thead id=\"thead\"><\/thead><tbody id=\"tbody\"><\/tbody><\/table><\/div>\n    <div id=\"moreWrap\"><\/div>\n  <\/section>\n<\/div>\n<div class=\"scrim\" id=\"scrim\" data-a=\"close\"><\/div>\n<aside id=\"drawer\" aria-label=\"Detalhes da caixa\"><\/aside>\n\n<script type=\"module\">\nconst FIREBASE_CONFIG={apiKey:\"AIzaSyAhB7rOrqvEzXc7wdOexJk7VyN0cqt_1Js\",authDomain:\"grd-cepe.firebaseapp.com\",projectId:\"grd-cepe\",storageBucket:\"grd-cepe.firebasestorage.app\",messagingSenderId:\"857647856675\",appId:\"1:857647856675:web:6b652bca002e9fbcef0596\"};\nconst INTERVALO=120; // segundos\nconst $=s=>document.querySelector(s);\nconst esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));\nconst ST=[{k:'preparacao',n:'Prepara\u00e7\u00e3o',wait:'novo',act:'preparando',q:null},{k:'captura',n:'Captura',wait:'preparado',act:'capturando',q:'qtdImagens'},{k:'inspecao',n:'Inspe\u00e7\u00e3o',wait:'capturado',act:'inspecionando',q:'qtdImagens'},{k:'indexacao',n:'Indexa\u00e7\u00e3o',wait:'inspecionado',act:'indexando',q:'qtdConjuntos'}];\nconst INFO={novo:[1,'espera','Aguardando prepara\u00e7\u00e3o'],preparando:[1,'ativo','Preparando'],preparado:[2,'espera','Aguardando captura'],capturando:[2,'ativo','Capturando'],capturado:[3,'espera','Aguardando inspe\u00e7\u00e3o'],inspecionando:[3,'ativo','Inspecionando'],inspecionado:[4,'espera','Aguardando indexa\u00e7\u00e3o'],indexando:[4,'ativo','Indexando'],pronto:[5,'pronto','Pronto']};\nconst COR=['var(--c0)','var(--c1)','var(--c2)','var(--c3)'];\nconst S={dias:30,cli:'',etapa:0,op:'',q:'',met:'n',hide:{},sort:['act',-1],lim:25,auto:true};\nlet DATA=[],fonte='',resta=INTERVALO,ultimo=Date.now(),loading=false,CH=[],db=null,fsm=null;\nconst fN=n=>(n||0).toLocaleString('pt-BR');\nconst pad=n=>String(n).padStart(2,'0');\nconst fDT=t=>{if(!t)return '\u2014';const d=new Date(t);return pad(d.getDate())+'/'+pad(d.getMonth()+1)+' '+pad(d.getHours())+':'+pad(d.getMinutes())};\nconst fDur=ms=>{if(ms==null||ms<0)return '\u2014';const m=Math.round(ms/6e4);return m<60?m+' min':Math.floor(m/60)+' h '+pad(m%60)+' min'};\nconst iso=t=>new Date(t).toISOString();\n/* Expediente (minutos do dia): 07:30\u201312:00, 13:00\u201315:00, 15:15\u201316:30. Fora disso (almo\u00e7o, lanche, noite) n\u00e3o conta. */\nconst EXP=[[450,720],[780,900],[915,990]],DIAS_UTEIS=[1,2,3,4,5]; // 1=segunda \u2026 5=sexta; inclua 6 para contar s\u00e1bado\nfunction workMs(a,b){a=+new Date(a);b=+new Date(b);if(!(b>a))return 0;let tot=0;const d=new Date(a);d.setHours(0,0,0,0);\n for(let t=+d;t<b;){if(DIAS_UTEIS.includes(new Date(t).getDay()))for(const[x,y]of EXP){const u=Math.max(a,t+x*6e4),v=Math.min(b,t+y*6e4);if(v>u)tot+=v-u}\n  const n=new Date(t);n.setDate(n.getDate()+1);t=+n}\n return tot}\nconst prox=t=>{for(let i=0;i<400&&!workMs(t,t+9e5);i++)t+=9e5;return t};\nlet GAP={};\nfunction calcGaps(){GAP={};const m={};DATA.forEach(o=>ST.forEach((s,i)=>{const d=o[s.k];if(d&&d.operador&&d.inicio&&d.fim)(m[d.operador]||(m[d.operador]=[])).push({a:+new Date(d.inicio),b:+new Date(d.fim),k:o.codigo+'|'+i})}));\n Object.values(m).forEach(l=>{l.sort((x,y)=>x.a-y.a);let end=l[0].b;for(let j=1;j<l.length;j++){if(l[j].a>=end)GAP[l[j].k]=workMs(end,l[j].a);end=Math.max(end,l[j].b)}})}\nconst cliente=o=>((o.ficha&&o.ficha.cliente)||(o.origem&&o.origem.cliente)||'').trim()||'Sem cliente';\nconst atividade=o=>{let t=+new Date(o.criadoEm)||0;ST.forEach(s=>{const d=o[s.k]||{};[d.inicio,d.fim].forEach(x=>{if(x)t=Math.max(t,+new Date(x))})});return t};\n\n/* ---------- Dados ---------- */\nfunction demo(){let s=7;const r=()=>(s=s*16807%2147483647)/2147483647;const cl=['SEFAZ-PE','Prefeitura do Recife','TJPE','Detran-PE','CPRH'],ops=['Ana Beatriz','Carlos Eduardo','Joana Lima','Marcos Vinicius','Paula Souza','Rafael Costa'];const now=Date.now(),out=[];\nfor(let n=0;n<80;n++){const t0=now-r()*34*864e5,age=(now-t0)/(34*864e5);const o={codigo:'CX-'+(2400+n),criadoEm:iso(t0),ficha:{cliente:cl[n%5]},status:'novo'};\nST.forEach(x=>o[x.k]={operador:null,matricula:null,inicio:null,fim:null,observacao:null});\nconst goal=r()<.2+.75*age?4:Math.floor(r()*4);let t=t0;\nfor(let i=0;i<4;i++){const d=o[ST[i].k],ini=prox(t+(.2+r()*2)*36e5);if(ini>now)break;\n d.operador=ops[(n+i*2)%6];d.matricula='M'+((n+i*2)%6);d.inicio=iso(ini);\n if(i<goal){const fim=ini+(20+r()*160)*6e4;if(fim>now){o.status=ST[i].act;break}\n  d.fim=iso(fim);t=fim;if(ST[i].q)d[ST[i].q]=i===3?40+(r()*300|0):800+(r()*4000|0);if(r()<.06)d.observacao='Documentos com umidade';\n  o.status=i===3?'pronto':ST[i+1].wait}\n else{if(r()<.5)o.status=ST[i].act;else{d.operador=d.matricula=d.inicio=null;o.status=ST[i].wait}break}}\nout.push(o)}\nreturn out}\nasync function lerFirebase(){\n if(!db){const b='https://www.gstatic.com/firebasejs/10.12.2/';const [a,f]=await Promise.all([import(b+'firebase-app.js'),import(b+'firebase-firestore.js')]);db=f.getFirestore(a.initializeApp(FIREBASE_CONFIG));fsm=f}\n const snap=await fsm.getDoc(fsm.doc(db,'cepe_producao','objetos'));\n return snap.exists()?JSON.parse(snap.data().v||'[]'):[]}\nasync function carregar(){\n if(loading)return;loading=true;$('#bRef').classList.add('spin');\n try{DATA=await Promise.race([lerFirebase(),new Promise((_,rj)=>setTimeout(()=>rj(new Error('tempo esgotado')),9000))]);fonte='live'}\n catch(e){console.warn('Firebase indispon\u00edvel:',e);if(fonte!=='live'||!DATA.length){DATA=demo();fonte='demo'}else fonte='erro'}\n loading=false;resta=INTERVALO;ultimo=Date.now();\n $('#dot').className='dot'+(fonte==='live'?'':' demo');\n $('#src').textContent=fonte==='live'?'Ao vivo \u00b7 Firebase':fonte==='erro'?'Sem conex\u00e3o \u00b7 mostrando \u00faltimos dados':'Modo demonstra\u00e7\u00e3o';\n $('#banner').innerHTML=fonte==='demo'?'<div class=\"banner\">N\u00e3o foi poss\u00edvel acessar o banco de dados daqui (rede ou regras do Firebase). Os dados abaixo s\u00e3o de exemplo. Hospede este arquivo junto do seu app e ele passa a mostrar os dados reais.<\/div>':'';\n $('#upd').textContent=' \u00b7 atualizado \u00e0s '+new Date().toLocaleTimeString('pt-BR');\n const sel=$('#selCli'),cur=S.cli;sel.innerHTML='<option value=\"\">Todos os clientes<\/option>'+[...new Set(DATA.map(cliente))].sort((a,b)=>a.localeCompare(b,'pt-BR')).map(c=>`<option ${c===cur?'selected':''}>${esc(c)}<\/option>`).join('');\n render(true);setTimeout(()=>$('#bRef').classList.remove('spin'),700)}\n\n/* ---------- C\u00e1lculos ---------- */\nconst dia0=()=>{const d=new Date();d.setHours(0,0,0,0);return +d};\nfunction eventos(objs,from,to){const ev=[];objs.forEach(o=>ST.forEach((s,i)=>{const d=o[s.k];if(!d||!d.fim)return;const t=+new Date(d.fim);if(t>=from&&t<to)ev.push({o,i,op:d.operador||'\u2014',t,q:s.q?(d[s.q]||0):0,w:d.inicio?workMs(d.inicio,d.fim):0,g:GAP[o.codigo+'|'+i]||0})}));return ev}\nfunction soma(ev){const r={n:ev.length,cx:0,cap:0,ins:0,idx:0,w:0,g:0};ev.forEach(e=>{r.w+=e.w;r.g+=e.g;if(e.i===1)r.cap+=e.q;if(e.i===2)r.ins+=e.q;if(e.i===3){r.idx+=e.q;r.cx++}});return r}\nconst delta=(a,b,inv)=>{if(!b&&!a)return '<span class=\"d eq\">sem atividade<\/span>';if(!b)return '<span class=\"d up\">novo no per\u00edodo<\/span>';const p=Math.round((a-b)/b*100);return `<span class=\"d ${p===0?'eq':(p>0)!==!!inv?'up':'dn'}\">${p>0?'\u25b2':p<0?'\u25bc':'\u2022'} ${Math.abs(p)}% vs. per\u00edodo anterior<\/span>`};\n\n/* ---------- Render ---------- */\nfunction render(flash){\n calcGaps();\n const objs=DATA.filter(o=>!S.cli||cliente(o)===S.cli);\n const hoje=dia0(),from=hoje-(S.dias-1)*864e5,to=hoje+864e5,from2=from-S.dias*864e5;\n const f=e=>!S.op||e.op===S.op;\n const ev=eventos(objs,from,to).filter(f),evP=eventos(objs,from2,from).filter(f);\n const a=soma(ev),b=soma(evP);\n const fila=objs.filter(o=>o.status!=='pronto').length,ativas=objs.filter(o=>(INFO[o.status]||[])[1]==='ativo').length;\n const K=[['Caixas na linha',fila,`<span class=\"d eq\">${ativas} em atividade agora<\/span>`],['Caixas finalizadas',a.cx,delta(a.cx,b.cx)],['Etapas conclu\u00eddas',a.n,delta(a.n,b.n)],['Imagens capturadas',a.cap,delta(a.cap,b.cap)],['Imagens inspecionadas',a.ins,delta(a.ins,b.ins)],['Conjuntos indexados',a.idx,delta(a.idx,b.idx)],['Tempo \u00fatil em caixa',fDur(a.w),delta(a.w,b.w)],['Tempo perdido entre lotes',fDur(a.g),delta(a.g,b.g,true)]];\n $('#kpis').innerHTML=K.map(k=>`<div class=\"card kpi ${flash?'flash':''}\"><div class=\"l\">${k[0]}<\/div><div class=\"num\">${typeof k[1]==='number'?fN(k[1]):k[1]}<\/div>${k[2]}<\/div>`).join('');\n // pipeline\n const cnt=i=>{const w=objs.filter(o=>INFO[o.status]&&INFO[o.status][0]===i&&INFO[o.status][1]==='espera').length,at=objs.filter(o=>INFO[o.status]&&INFO[o.status][0]===i&&INFO[o.status][1]==='ativo').length;return[w,at]};\n $('#pipe').innerHTML=ST.map((s,i)=>{const[w,at]=cnt(i+1);return`<button class=\"stg ${S.etapa===i+1?'on':''}\" data-a=\"etapa\" data-v=\"${i+1}\"><div class=\"n\"><i style=\"background:${COR[i]}\"><\/i>${s.n}<\/div><div class=\"num\">${w+at}<\/div><div class=\"s\"><b>${at}<\/b> em andamento \u00b7 <b>${w}<\/b> na fila<\/div><\/button>`}).join('')+\n  `<button class=\"stg ${S.etapa===5?'on':''}\" data-a=\"etapa\" data-v=\"5\"><div class=\"n\"><i style=\"background:var(--mute)\"><\/i>Prontas<\/div><div class=\"num\">${objs.filter(o=>o.status==='pronto').length}<\/div><div class=\"s\">total acumulado<\/div><\/button>`;\n chips();chart(ev,from);ops(ev);tabela(objs)}\nfunction chips(){const c=[];if(S.op)c.push(['op','Operador: '+S.op]);if(S.etapa)c.push(['etapa',S.etapa===5?'Prontas':ST[S.etapa-1].n]);\n $('#chips').innerHTML=c.map(x=>`<span class=\"chip\">${esc(x[1])}<button data-a=\"clr\" data-v=\"${x[0]}\" aria-label=\"Remover filtro\">\u00d7<\/button><\/span>`).join(' ')}\nfunction nice(m){m=m||1;const p=10**Math.floor(Math.log10(m));return[1,2,5,10].find(x=>x*p>=m)*p}\nfunction chart(ev,from){\n const N=S.dias;CH=Array.from({length:N},(_,i)=>({t:from+i*864e5,v:[0,0,0,0]}));\n ev.forEach(e=>{const d=CH[Math.min(N-1,Math.max(0,Math.floor((e.t-from)/864e5)))];d.v[e.i]+=S.met==='vol'?e.q:1});\n const vis=i=>!S.hide[i],tot=d=>d.v.reduce((s,x,i)=>s+(vis(i)?x:0),0);\n const mx=nice(Math.max(...CH.map(tot))),W=760,H=250,L=44,R=6,T=10,B=24,bw=(W-L-R)/N,y=v=>T+(H-T-B)*(1-v/mx);\n let g='';for(let k=0;k<=4;k++){const v=mx*k/4;g+=`<line x1=\"${L}\" x2=\"${W-R}\" y1=\"${y(v)}\" y2=\"${y(v)}\" stroke=\"#17493A\" stroke-dasharray=\"${k?'3 4':'0'}\"/><text x=\"${L-6}\" y=\"${y(v)+4}\" text-anchor=\"end\">${v>=1e3?(v/1e3)+'k':v}<\/text>`}\n const step=Math.ceil(N/8);\n CH.forEach((d,i)=>{let acc=0;d.v.forEach((v,j)=>{if(!vis(j)||!v)return;const h=(H-T-B)*v/mx;g+=`<rect x=\"${L+i*bw+bw*.15}\" y=\"${y(acc+v)}\" width=\"${bw*.7}\" height=\"${h}\" fill=\"${['#F2B04A','#2BD48F','#4CC3E8','#B79CFF'][j]}\" rx=\"${bw>8?2:0}\"/>`;acc+=v});\n  if(i%step===0){const dt=new Date(d.t);g+=`<text x=\"${L+i*bw+bw/2}\" y=\"${H-6}\" text-anchor=\"middle\">${pad(dt.getDate())}/${pad(dt.getMonth()+1)}<\/text>`}});\n g+=`<line id=\"cur\" x1=\"0\" x2=\"0\" y1=\"${T}\" y2=\"${H-B}\" stroke=\"#E6F5EE\" stroke-opacity=\".35\" visibility=\"hidden\"/>`;\n $('#chart').innerHTML=`<svg viewBox=\"0 0 ${W} ${H}\" data-l=\"${L}\" data-w=\"${W}\" data-bw=\"${bw}\">${g}<\/svg><div class=\"tip\" id=\"tip\"><\/div>`;\n $('#leg').innerHTML=ST.map((s,i)=>`<button class=\"${S.hide[i]?'off':''}\" data-a=\"leg\" data-v=\"${i}\"><i style=\"background:${COR[i]}\"><\/i>${s.n}<\/button>`).join('')}\nfunction ops(ev){\n const m={};ev.forEach(e=>{const o=m[e.op]||(m[e.op]={n:0,q:0,w:0,g:0,v:[0,0,0,0]});o.n++;o.q+=e.q;o.w+=e.w;o.g+=e.g;o.v[e.i]++});\n let l=Object.entries(m).sort((a,b)=>b[1].n-a[1].n).slice(0,8);\n if(S.op&&!m[S.op])l=[[S.op,{n:0,q:0,w:0,g:0,v:[0,0,0,0]}],...l];\n const mx=Math.max(1,...l.map(x=>x[1].n));\n $('#ops').innerHTML=(l.length?l.map(([k,o])=>`<button class=\"op ${S.op===k?'on':''}\" data-a=\"op\" data-v=\"${esc(k)}\"><div class=\"t\">${esc(k)}<span>${o.n} etapas \u00b7 ${fN(o.q)} un.<\/span><\/div><div class=\"tm\"><span>\u23f1 ${fDur(o.w)} em caixa<\/span><span class=\"lost\">\u23f3 ${fDur(o.g)} perdidos<\/span><\/div><div class=\"bar\" style=\"width:${o.n/mx*100}%\">${o.v.map((v,i)=>`<span style=\"flex:${v};background:${COR[i]}\"><\/span>`).join('')}<\/div><\/button>`).join(''):'<div class=\"empty\">Sem produ\u00e7\u00e3o no per\u00edodo.<\/div>')+'<div class=\"sub\" style=\"margin:10px 4px 0\">Expediente 07:30\u201316:30, sem almo\u00e7o (12:00\u201313:00) e lanche (15:00\u201315:15). Tempo perdido = intervalo entre o fim de um lote e o in\u00edcio do pr\u00f3ximo do mesmo operador.<\/div>'}\nconst COLS=[['codigo','Caixa'],['cli','Cliente'],['status','Situa\u00e7\u00e3o'],['prog','Progresso'],['act','\u00daltima atividade'],['img','Imagens']];\nfunction tabela(objs){\n const q=S.q.toLowerCase();\n let l=objs.filter(o=>(!S.etapa||(INFO[o.status]||[])[0]===S.etapa)&&(!S.op||ST.some(s=>(o[s.k]||{}).operador===S.op))&&(!q||(o.codigo+' '+cliente(o)).toLowerCase().includes(q)));\n const key={codigo:o=>o.codigo,cli:cliente,status:o=>(INFO[o.status]||[0])[0],prog:o=>ST.filter(s=>(o[s.k]||{}).fim).length,act:atividade,img:o=>(o.captura||{}).qtdImagens||0}[S.sort[0]];\n l.sort((x,y)=>{const a=key(x),b=key(y);return(a>b?1:a<b?-1:0)*S.sort[1]});\n $('#tcount').textContent=l.length+' de '+objs.length;\n $('#thead').innerHTML='<tr>'+COLS.map(c=>`<th><button data-a=\"sort\" data-v=\"${c[0]}\">${c[1]}${S.sort[0]===c[0]?(S.sort[1]>0?' \u25b2':' \u25bc'):''}<\/button><\/th>`).join('')+'<\/tr>';\n $('#tbody').innerHTML=l.slice(0,S.lim).map(o=>{const i=INFO[o.status]||[0,'espera',o.status];\n  return`<tr data-a=\"open\" data-v=\"${esc(o.codigo)}\"><td class=\"cod\">${esc(o.codigo)}<\/td><td>${esc(cliente(o))}<\/td><td><span class=\"pill ${i[1]}\">${i[2]}<\/span><\/td><td><div class=\"prog\">${ST.map(s=>`<i class=\"${(o[s.k]||{}).fim?'f':INFO[o.status]&&INFO[o.status][1]==='ativo'&&o.status===s.act?'a':''}\"><\/i>`).join('')}<\/div><\/td><td>${fDT(atividade(o))}<\/td><td>${fN((o.captura||{}).qtdImagens)}<\/td><\/tr>`}).join('')||'<tr><td colspan=\"6\" class=\"empty\">Nenhuma caixa encontrada.<\/td><\/tr>';\n $('#moreWrap').innerHTML=l.length>S.lim?`<button class=\"more\" data-a=\"more\">Mostrar mais (${l.length-S.lim})<\/button>`:''}\nfunction abrir(cod){\n const o=DATA.find(x=>x.codigo===cod);if(!o)return;const i=INFO[o.status]||[0,'espera',o.status];\n $('#drawer').innerHTML=`<button class=\"ib x\" data-a=\"close\" aria-label=\"Fechar\">\u2715<\/button><h2>${esc(o.codigo)}<\/h2><div class=\"sub\" style=\"margin-bottom:10px\">${esc(cliente(o))}<\/div><span class=\"pill ${i[1]}\">${i[2]}<\/span>\n <div class=\"sub\" style=\"margin-top:10px\">Recebida em ${fDT(o.criadoEm)}${o.origem&&o.origem.setor?' \u00b7 '+esc(o.origem.setor):''}<\/div>\n <ul class=\"tl\">${ST.map((s,k)=>{const d=o[s.k]||{},cl=d.fim?'f':o.status===s.act?'a':'';return`<li class=\"${cl}\"><b>${s.n}<\/b><small>${d.operador?esc(d.operador):'Ainda n\u00e3o iniciada'}<\/small>${d.inicio?`<small>${fDT(d.inicio)} \u2192 ${fDT(d.fim)} \u00b7 ${d.fim?'tempo \u00fatil '+fDur(workMs(d.inicio,d.fim)):'em andamento'}<\/small>${GAP[o.codigo+'|'+k]!=null?`<small style=\"color:var(--c0)\">\u23f3 ${fDur(GAP[o.codigo+'|'+k])} perdidos desde o lote anterior<\/small>`:''}`:''}${s.q&&d[s.q]!=null?`<small>${fN(d[s.q])} ${s.q==='qtdConjuntos'?'conjuntos':'imagens'}<\/small>`:''}${d.observacao?`<div class=\"obs\">\u26a0 ${esc(d.observacao)}<\/div>`:''}<\/li>`}).join('')}<\/ul><div class=\"sub\">Tempo \u00fatil total na caixa: <b style=\"color:var(--ink)\">${fDur(ST.reduce((t,s)=>{const d=o[s.k]||{};return t+(d.inicio&&d.fim?workMs(d.inicio,d.fim):0)},0))}<\/b> (somente expediente)<\/div>`;\n $('#drawer').classList.add('on');$('#scrim').classList.add('on')}\nconst fechar=()=>{$('#drawer').classList.remove('on');$('#scrim').classList.remove('on')};\n\n/* ---------- Eventos ---------- */\nconst A={\n dias(v){S.dias=+v;document.querySelectorAll('#segDias button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));render()},\n met(v){S.met=v;document.querySelectorAll('#segMet button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));render()},\n etapa(v){S.etapa=S.etapa===+v?0:+v;S.lim=25;render()},\n op(v){S.op=S.op===v?'':v;S.lim=25;render()},\n leg(v){S.hide[v]=!S.hide[v];render()},\n clr(v){if(v==='op')S.op='';else S.etapa=0;render()},\n sort(v){S.sort=S.sort[0]===v?[v,-S.sort[1]]:[v,v==='codigo'||v==='cli'?1:-1];render()},\n more(){S.lim+=25;render()},\n open:abrir,close:fechar,refresh:carregar,\n auto(){S.auto=!S.auto;$('#bAuto').innerHTML=S.auto?'<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><rect x=\"3\" y=\"2\" width=\"3\" height=\"10\"/><rect x=\"8\" y=\"2\" width=\"3\" height=\"10\"/><\/svg>':'<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><path d=\"M4 2l8 5-8 5z\"/><\/svg>';$('#bAuto').setAttribute('aria-label',S.auto?'Pausar atualiza\u00e7\u00e3o autom\u00e1tica':'Retomar atualiza\u00e7\u00e3o autom\u00e1tica');tick(true)}\n};\ndocument.addEventListener('click',e=>{const t=e.target.closest('[data-a]');if(!t)return;if(t.id==='scrim'&&e.target!==t)return;A[t.dataset.a]&&A[t.dataset.a](t.dataset.v)});\ndocument.addEventListener('keydown',e=>{if(e.key==='Escape')fechar();if((e.key==='Enter')&&e.target.matches('tr[data-a]'))e.target.click()});\n$('#selCli').addEventListener('change',e=>{S.cli=e.target.value;S.lim=25;render()});\n$('#q').addEventListener('input',e=>{S.q=e.target.value;S.lim=25;tabela(DATA.filter(o=>!S.cli||cliente(o)===S.cli))});\n$('#chart').addEventListener('mousemove',e=>{const svg=$('#chart svg');if(!svg||!CH.length)return;const r=svg.getBoundingClientRect(),k=r.width/760,L=44,bw=(760-L-6)/CH.length;\n const i=Math.floor(((e.clientX-r.left)/k-L)/bw),tip=$('#tip'),cur=$('#cur');if(i<0||i>=CH.length){tip.style.opacity=0;cur.setAttribute('visibility','hidden');return}\n const d=CH[i],dt=new Date(d.t);cur.setAttribute('visibility','visible');cur.setAttribute('x1',L+i*bw+bw/2);cur.setAttribute('x2',L+i*bw+bw/2);\n tip.innerHTML=`<b>${dt.toLocaleDateString('pt-BR',{weekday:'short',day:'2-digit',month:'short'})}<\/b>`+ST.map((s,j)=>S.hide[j]?'':`<div><i style=\"background:${COR[j]}\"><\/i>${s.n}: ${fN(d.v[j])}<\/div>`).join('');\n const x=(L+i*bw+bw/2)*k;tip.style.opacity=1;tip.style.left=Math.min(x+12,r.width-tip.offsetWidth-4)+'px';tip.style.top='10px'});\n$('#chart').addEventListener('mouseleave',()=>{const t=$('#tip'),c=$('#cur');if(t)t.style.opacity=0;if(c)c.setAttribute('visibility','hidden')});\n\n/* ---------- Atualiza\u00e7\u00e3o autom\u00e1tica a cada 2 min ---------- */\nfunction tick(soDesenhar){\n resta=Math.max(0,INTERVALO-Math.floor((Date.now()-ultimo)/1000));if(!S.auto)ultimo=Date.now()-(INTERVALO-resta)*1000;\n if(!soDesenhar&&S.auto&&!loading&&resta<=0)carregar();\n $('#cd').textContent=S.auto?Math.floor(resta/60)+':'+pad(resta%60):'pausado';\n $('#fg').setAttribute('stroke-dashoffset',62.8*(1-(S.auto?resta/INTERVALO:0)))}\nsetInterval(tick,1000);\ndocument.addEventListener('visibilitychange',()=>{if(!document.hidden&&S.auto&&Date.now()-ultimo>INTERVALO*1000)carregar()});\ncarregar();\n<\/script>\n<\/body>\n<\/html>\n";
+function telaDashboardGestor(){
+  return '<iframe id="iframe-dash" class="dash-frame" title="Dashboard de produção"></iframe>';
+}
 async function renderMainGestor(){
   if((abaAtualGestor==='operadores' || abaAtualGestor==='config') && !ehAdmin()) abaAtualGestor = 'painel';
+  const main = document.getElementById('main-gestor');
+  /* o dashboard cuida da própria atualização: não recarregar o quadro a cada mudança do banco */
+  if(abaAtualGestor==='dashboard' && main.querySelector('#iframe-dash')) return;
   await carregarObjetos();
   await carregarOperadores();
-  const main = document.getElementById('main-gestor');
   if(abaAtualGestor==='painel') main.innerHTML = await telaPainelGestor();
+  else if(abaAtualGestor==='dashboard'){ main.innerHTML = telaDashboardGestor(); document.getElementById('iframe-dash').srcdoc = DASHBOARD_HTML; }
   else if(abaAtualGestor==='producao') main.innerHTML = telaProducaoOperador();
   else if(abaAtualGestor==='operadores') main.innerHTML = telaOperadoresGestor();
   else if(abaAtualGestor==='config') main.innerHTML = await telaConfigGestor();
@@ -1739,7 +1786,7 @@ function blocoOperadoresAtivos(){
         <span class="obj-meta">Caixa<br><b class="mono">${escapeHtml(o.codigo)}</b></span>
         <span class="status-pill pill-active">${INFO_STATUS[o.status].label}</span>
         <span class="obj-meta">Início<br><b>${fmtDataCurta(d.inicio)} ${fmtHoraCurta(d.inicio)}</b></span>
-        <span class="obj-meta">Tempo na caixa<br><b>${fmtDur(d.inicio, null)}</b></span>
+        <span class="obj-meta">Tempo na caixa<br><b>${fmtUtil(d.inicio, null)}</b></span>
       </div>`).join('') + `</div>`}
   `;
 }
@@ -2234,7 +2281,7 @@ function fxLinhaAuto(e, d){
     <td data-label="Colaborador">${nome ? `<div class="fx-colab"><span class="fx-av">${escapeHtml(nome==='Outro colaborador' ? '•' : iniciaisNome(nome))}</span><div><b>${escapeHtml(nome)}</b>${mostraMat?`<small>Mat. ${escapeHtml(d.matricula)}</small>`:''}</div></div>` : '<span class="fx-vazio">—</span>'}</td>
     <td class="c-dt" data-label="Início">${fxDtCelula(d.inicio)}</td>
     <td class="c-dt" data-label="Término">${fxDtCelula(d.fim)}</td>
-    <td data-label="Duração">${d.inicio && d.fim ? fmtDur(d.inicio, d.fim) : '<span class="fx-vazio">—</span>'}</td>
+    <td data-label="Duração">${d.inicio && d.fim ? fmtUtil(d.inicio, d.fim) : '<span class="fx-vazio">—</span>'}</td>
     <td data-label="Quantidade">${e.qtdCampo ? (qtd!=null ? `<b>${qtd}</b> ${e.qtdLabel.toLowerCase()}` : '<span class="fx-vazio">—</span>') : '<span class="fx-vazio">—</span>'}</td>
     <td data-label="Visto">${d.fim ? `<span class="fx-ok">✓ Visto digital</span><small>${escapeHtml(nome||'')}</small>` : '<span class="fx-vazio">Aguardando</span>'}</td>
   </tr>`;
@@ -2441,6 +2488,7 @@ function clientesConhecidos(){
   return Array.from(mapa.values()).sort((a,b)=>a.localeCompare(b,'pt-BR'));
 }
 function eventosProducao(f){
+  calcGaps();
   const ev = [];
   cacheObjetos.forEach(o=>{
     const cli = ((o.ficha && o.ficha.cliente) || '').trim();
@@ -2455,15 +2503,16 @@ function eventosProducao(f){
       if(f.ano && dt.getFullYear() !== Number(f.ano)) return;
       if(f.matricula && d.matricula !== f.matricula) return;
       ev.push({codigo:o.codigo, cliente:cli, etapa:e.nome, k:e.k, operador:d.operador||'—', matricula:d.matricula||'',
-               inicio:d.inicio, fim:d.fim, qtd:e.q ? (d[e.q]||0) : null, ql:e.ql});
+               inicio:d.inicio, fim:d.fim, qtd:e.q ? (d[e.q]||0) : null, ql:e.ql,
+               w:d.inicio ? workMs(d.inicio, d.fim) : 0, g:(GAP[o.codigo+'|'+e.k] != null ? GAP[o.codigo+'|'+e.k] : null)});
     });
   });
   return ev;
 }
 function somarEventos(ev){
-  const r = {prep:0, cap:0, capQtd:0, ins:0, insQtd:0, idx:0, idxQtd:0, caixas:new Set()};
+  const r = {prep:0, cap:0, capQtd:0, ins:0, insQtd:0, idx:0, idxQtd:0, w:0, g:0, caixas:new Set()};
   ev.forEach(x=>{
-    r.caixas.add(x.codigo);
+    r.caixas.add(x.codigo); r.w += x.w||0; r.g += x.g||0;
     if(x.k==='preparacao') r.prep++;
     else if(x.k==='captura'){ r.cap++; r.capQtd += x.qtd; }
     else if(x.k==='inspecao'){ r.ins++; r.insQtd += x.qtd; }
@@ -2484,7 +2533,7 @@ function textoPeriodo(mes, ano){
   if(ano) return 'Ano de '+ano;
   return 'Todo o período';
 }
-function msEvento(x){ return x.inicio && x.fim ? Math.max(0, new Date(x.fim) - new Date(x.inicio)) : null; }
+function msEvento(x){ return x.inicio && x.fim ? workMs(x.inicio, x.fim) : null; }
 function mediaMs(lista){
   const v = lista.map(msEvento).filter(n=>n!==null);
   return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null;
@@ -2500,9 +2549,9 @@ function rpLabelQtd(k){ return k==='indexacao' ? 'Conjuntos indexados' : 'Imagen
 function rpDetalheEventos(lista){
   const l = lista.slice().sort((a,b)=>new Date(a.fim)-new Date(b.fim));
   return `<div class="rp-wrap"><table class="rp-table">
-    <thead><tr><th>Data</th><th>Caixa</th><th>Cliente</th><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Duração</th><th>Quantidade</th></tr></thead>
+    <thead><tr><th>Data</th><th>Caixa</th><th>Cliente</th><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Tempo útil</th><th>Perdido antes</th><th>Quantidade</th></tr></thead>
     <tbody>${l.map(x=>`<tr><td>${fmtDataCurta(x.fim)}</td><td class="mono">${escapeHtml(x.codigo)}</td><td>${escapeHtml(x.cliente||'—')}</td><td>${x.etapa}</td><td>${escapeHtml(x.operador)}</td>
-      <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtDur(x.inicio, x.fim) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+      <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtUtil(x.inicio, x.fim) : '—'}</td><td>${x.g!=null ? fmtMs(x.g) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function rpStats(itens){
   return `<div class="rp-stats">${itens.map(i=>`<div class="rp-stat"><div class="n">${i[0]}</div><div class="l">${i[1]}</div></div>`).join('')}</div>`;
@@ -2515,14 +2564,14 @@ function rpTabelaOperadores(ev){
     const linhas = Array.from(agrupar(evE, x=>x.matricula||x.operador).entries()).map(([mat, lista])=>{
       const u = cacheOperadores.find(o=>o.matricula===mat);
       return {nome: u ? u.nome : lista[0].operador, mat, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size,
-              qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+              qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista), w:lista.reduce((a,x)=>a+x.w,0), g:lista.reduce((a,x)=>a+(x.g||0),0)};
     }).sort((a,b)=>b.n-a.n);
     const totQtd = evE.reduce((a,x)=>a+(x.qtd||0),0);
     return `<div class="rp-etapa">${e.nome} <span class="rp-mut">· ${linhas.length} operador${linhas.length>1?'es':''}</span></div>
       <div class="rp-wrap"><table class="rp-table">
-      <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo médio</th></tr></thead>
-      <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody>
-      <tfoot><tr><td>Total ${e.nome}</td><td>${evE.length}</td><td>${new Set(evE.map(x=>x.codigo)).size}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(mediaMs(evE))}</td></tr></tfoot>
+      <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo útil</th><th>Tempo médio</th><th>Tempo perdido</th></tr></thead>
+      <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.w)}</td><td>${fmtMs(l.media)}</td><td>${fmtMs(l.g)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>Total ${e.nome}</td><td>${evE.length}</td><td>${new Set(evE.map(x=>x.codigo)).size}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(evE.reduce((a,x)=>a+x.w,0))}</td><td>${fmtMs(mediaMs(evE))}</td><td>${fmtMs(evE.reduce((a,x)=>a+(x.g||0),0))}</td></tr></tfoot>
       </table></div>`;
   }).join('');
   return blocos || '<div class="rp-vazio">Nenhum registro de produção para os filtros escolhidos.</div>';
@@ -2532,7 +2581,8 @@ function relatorioHTML(cfg){
   const logo = (document.querySelector('.brand-mark img')||{}).src || '';
   const per = cfg.tipo==='objeto' ? 'Histórico completo' : textoPeriodo(cfg.mes, cfg.ano);
   let titulo, sub, corpo = '';
-  let nota = 'Considera etapas concluídas no período.';
+  const NOTA_EXP = ' Tempo útil = somente o expediente (07:30–16:30), sem almoço (12:00–13:00) e lanche (15:00–15:15). Tempo perdido = intervalo entre o fim de um lote e o início do próximo do mesmo operador, dentro do expediente.';
+  let nota = 'Considera etapas concluídas no período.' + NOTA_EXP;
   const tot = somarEventos(ev);
   const vazio = '<div class="rp-vazio">Nenhum registro de produção para os filtros escolhidos.</div>';
 
@@ -2543,11 +2593,11 @@ function relatorioHTML(cfg){
     if(!ev.length) corpo = vazio;
     else{
       const lista = ev.slice().sort((a,b)=>new Date(a.fim)-new Date(b.fim));
-      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados']])
+      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados'],[fmtMs(tot.w),'Tempo útil'],[fmtMs(tot.g),'Tempo perdido']])
       + `<div class="fx-sec">Detalhamento</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Data</th><th>Caixa</th><th>Cliente</th><th>Etapa</th><th>Início</th><th>Término</th><th>Duração</th><th>Quantidade</th></tr></thead>
+        <thead><tr><th>Data</th><th>Caixa</th><th>Cliente</th><th>Etapa</th><th>Início</th><th>Término</th><th>Tempo útil</th><th>Perdido antes</th><th>Quantidade</th></tr></thead>
         <tbody>${lista.map(x=>`<tr><td>${fmtDataCurta(x.fim)}</td><td class="mono">${escapeHtml(x.codigo)}</td><td>${escapeHtml(x.cliente||'—')}</td><td>${x.etapa}</td>
-          <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtDur(x.inicio, x.fim) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+          <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtUtil(x.inicio, x.fim) : '—'}</td><td>${x.g!=null ? fmtMs(x.g) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
     }
   }else if(cfg.tipo==='setor'){
     const et = ETAPAS_REL.find(e=>e.k===cfg.etapa);
@@ -2559,25 +2609,25 @@ function relatorioHTML(cfg){
       const linhas = Array.from(agrupar(ev, x=>x.matricula||x.operador).entries()).map(([mat, lista])=>{
         const u = cacheOperadores.find(o=>o.matricula===mat);
         return {nome: u ? u.nome : lista[0].operador, mat, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size,
-                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista), w:lista.reduce((a,x)=>a+x.w,0), g:lista.reduce((a,x)=>a+(x.g||0),0)};
       }).sort((a,b)=>b.n-a.n);
       const totQtd = ev.reduce((a,x)=>a+(x.qtd||0),0);
-      corpo = rpStats([[ev.length,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[temQ?totQtd:'—', temQ?qlab:'Quantidade'],[fmtMs(mediaMs(ev)),'Tempo médio por caixa'],[linhas.length,'Operadores']])
+      corpo = rpStats([[ev.length,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[temQ?totQtd:'—', temQ?qlab:'Quantidade'],[fmtMs(mediaMs(ev)),'Tempo médio por caixa'],[linhas.length,'Operadores'],[fmtMs(tot.w),'Tempo útil'],[fmtMs(tot.g),'Tempo perdido']])
       + `<div class="fx-sec">Produção por operador — ${et.nome}</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo médio</th></tr></thead>
-        <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody>
-        <tfoot><tr><td>Total</td><td>${ev.length}</td><td>${tot.nCaixas}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(mediaMs(ev))}</td></tr></tfoot></table></div>
+        <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo útil</th><th>Tempo médio</th><th>Tempo perdido</th></tr></thead>
+        <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.w)}</td><td>${fmtMs(l.media)}</td><td>${fmtMs(l.g)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td>Total</td><td>${ev.length}</td><td>${tot.nCaixas}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(tot.w)}</td><td>${fmtMs(mediaMs(ev))}</td><td>${fmtMs(tot.g)}</td></tr></tfoot></table></div>
         <div class="fx-sec">Detalhamento</div>${rpDetalheEventos(ev)}`;
     }else{
       const linhas = ETAPAS_REL.map(e=>{
         const lista = ev.filter(x=>x.k===e.k);
         return {e, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size, ops:new Set(lista.map(x=>x.matricula||x.operador)).size,
-                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista), w:lista.reduce((a,x)=>a+x.w,0), g:lista.reduce((a,x)=>a+(x.g||0),0)};
       });
-      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados']])
+      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados'],[fmtMs(tot.w),'Tempo útil'],[fmtMs(tot.g),'Tempo perdido']])
       + `<div class="fx-sec">Comparativo entre setores</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Setor</th><th>Etapas concluídas</th><th>Caixas</th><th>Operadores</th><th>Quantidade</th><th>Tempo médio</th></tr></thead>
-        <tbody>${linhas.map(l=>`<tr><td><b>${l.e.nome}</b></td><td>${l.n}</td><td>${l.caixas}</td><td>${l.ops}</td><td>${l.e.q ? l.qtd+' '+l.e.ql : '—'}</td><td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody></table></div>`;
+        <thead><tr><th>Setor</th><th>Etapas concluídas</th><th>Caixas</th><th>Operadores</th><th>Quantidade</th><th>Tempo útil</th><th>Tempo médio</th><th>Tempo perdido</th></tr></thead>
+        <tbody>${linhas.map(l=>`<tr><td><b>${l.e.nome}</b></td><td>${l.n}</td><td>${l.caixas}</td><td>${l.ops}</td><td>${l.e.q ? l.qtd+' '+l.e.ql : '—'}</td><td>${fmtMs(l.w)}</td><td>${fmtMs(l.media)}</td><td>${fmtMs(l.g)}</td></tr>`).join('')}</tbody></table></div>`;
     }
   }else if(cfg.tipo==='objeto'){
     const o = cacheObjetos.find(x=>x.codigo===cfg.codigo) || {};
@@ -2585,21 +2635,21 @@ function relatorioHTML(cfg){
     const cli = (fc.cliente||'').trim();
     titulo = 'Relatório por objeto (caixa)';
     sub = 'Caixa '+cfg.codigo+(cli ? ' · '+cli : '');
-    nota = 'Mostra todas as etapas já iniciadas, inclusive as em andamento.';
+    nota = 'Mostra todas as etapas já iniciadas, inclusive as em andamento.' + NOTA_EXP;
     const linhas = ETAPAS_REL.map(e=>({e, d:o[e.k]||{}})).filter(x=>x.d.inicio);
     const concl = linhas.filter(x=>x.d.fim);
-    const msTotal = concl.reduce((a,x)=>a+Math.max(0,new Date(x.d.fim)-new Date(x.d.inicio)),0);
+    const msTotal = concl.reduce((a,x)=>a+workMs(x.d.inicio, x.d.fim),0);
     const soma = k=>concl.filter(x=>x.e.k===k).reduce((a,x)=>a+(x.d[x.e.q]||0),0);
     const dh = iso=> iso ? fmtDataCurta(iso)+' '+fmtHoraCurta(iso) : '—';
     corpo = rpStats([[o.status && INFO_STATUS[o.status] ? INFO_STATUS[o.status].label : '—','Situação atual'],[concl.length,'Etapas concluídas'],[soma('captura'),'Imagens capturadas'],[soma('inspecao'),'Imagens inspecionadas'],[soma('indexacao'),'Conjuntos indexados']])
     + `<div class="fx-sec">Identificação</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Cliente</th><th>Tipo de documento</th><th>Descrição</th><th>Recebida em</th><th>Tempo total trabalhado</th></tr></thead>
+        <thead><tr><th>Cliente</th><th>Tipo de documento</th><th>Descrição</th><th>Recebida em</th><th>Tempo útil total</th></tr></thead>
         <tbody><tr><td>${escapeHtml(cli||'—')}</td><td>${escapeHtml(fc.tipoDocumento||'—')}</td><td>${escapeHtml(fc.descricao||'—')}</td><td>${dh(o.criadoEm)}</td><td>${concl.length ? fmtMs(msTotal) : '—'}</td></tr></tbody></table></div>
       <div class="fx-sec">Etapas</div>`
     + (linhas.length ? `<div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Duração</th><th>Quantidade</th><th>Replace</th><th>Situação</th><th>Observação</th></tr></thead>
+        <thead><tr><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Tempo útil</th><th>Perdido antes</th><th>Quantidade</th><th>Replace</th><th>Situação</th><th>Observação</th></tr></thead>
         <tbody>${linhas.map(({e,d})=>`<tr><td><b>${e.nome}</b></td><td>${escapeHtml(d.operador||'—')}</td><td>${dh(d.inicio)}</td><td>${dh(d.fim)}</td>
-          <td>${fmtDur(d.inicio, d.fim||null)}</td><td>${e.q ? (d[e.q]!=null ? d[e.q]+' '+e.ql : '—') : '—'}</td><td>${e.k==='inspecao' && d.qtdReplace!=null ? d.qtdReplace : '—'}</td>
+          <td>${d.inicio ? fmtUtil(d.inicio, d.fim||null) : '—'}</td><td>${GAP[cfg.codigo+'|'+e.k]!=null ? fmtMs(GAP[cfg.codigo+'|'+e.k]) : '—'}</td><td>${e.q ? (d[e.q]!=null ? d[e.q]+' '+e.ql : '—') : '—'}</td><td>${e.k==='inspecao' && d.qtdReplace!=null ? d.qtdReplace : '—'}</td>
           <td>${d.fim ? 'Concluída' : 'Em andamento'}</td><td>${escapeHtml(d.observacao||'—')}</td></tr>`).join('')}</tbody></table></div>`
       : '<div class="rp-vazio">Esta caixa ainda não passou por nenhuma etapa de produção.</div>');
   }else if(cfg.tipo==='cliente'){
@@ -2613,12 +2663,12 @@ function relatorioHTML(cfg){
         const ultima = lista.reduce((m,x)=> !m || new Date(x.fim)>new Date(m) ? x.fim : m, null);
         return {cod, o, r, ultima};
       }).sort((a,b)=>new Date(a.ultima)-new Date(b.ultima));
-      corpo = rpStats([[tot.nCaixas,'Caixas'],[tot.total,'Etapas concluídas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados']])
+      corpo = rpStats([[tot.nCaixas,'Caixas'],[tot.total,'Etapas concluídas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados'],[fmtMs(tot.w),'Tempo útil'],[fmtMs(tot.g),'Tempo perdido']])
       + `<div class="fx-sec">Caixas</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Caixa</th><th>Situação</th><th>Recebida em</th><th>Imagens capt.</th><th>Imagens insp.</th><th>Conjuntos</th><th>Etapas</th><th>Última etapa</th></tr></thead>
+        <thead><tr><th>Caixa</th><th>Situação</th><th>Recebida em</th><th>Imagens capt.</th><th>Imagens insp.</th><th>Conjuntos</th><th>Etapas</th><th>Tempo útil</th><th>Tempo perdido</th><th>Última etapa</th></tr></thead>
         <tbody>${porCaixa.map(c=>`<tr><td class="mono"><b>${escapeHtml(c.cod)}</b></td><td>${c.o.status && INFO_STATUS[c.o.status] ? INFO_STATUS[c.o.status].label : '—'}</td><td>${fmtDataCurta(c.o.criadoEm)}</td>
-          <td>${c.r.capQtd}</td><td>${c.r.insQtd}</td><td>${c.r.idxQtd}</td><td>${c.r.total}</td><td>${fmtDataCurta(c.ultima)} ${fmtHoraCurta(c.ultima)}</td></tr>`).join('')}</tbody>
-        <tfoot><tr><td>Total (${tot.nCaixas})</td><td></td><td></td><td>${tot.capQtd}</td><td>${tot.insQtd}</td><td>${tot.idxQtd}</td><td>${tot.total}</td><td></td></tr></tfoot></table></div>
+          <td>${c.r.capQtd}</td><td>${c.r.insQtd}</td><td>${c.r.idxQtd}</td><td>${c.r.total}</td><td>${fmtMs(c.r.w)}</td><td>${fmtMs(c.r.g)}</td><td>${fmtDataCurta(c.ultima)} ${fmtHoraCurta(c.ultima)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td>Total (${tot.nCaixas})</td><td></td><td></td><td>${tot.capQtd}</td><td>${tot.insQtd}</td><td>${tot.idxQtd}</td><td>${tot.total}</td><td>${fmtMs(tot.w)}</td><td>${fmtMs(tot.g)}</td><td></td></tr></tfoot></table></div>
         <div class="fx-sec">Operadores neste cliente</div>${rpTabelaOperadores(ev)}`;
     }
   }else{
@@ -2627,11 +2677,11 @@ function relatorioHTML(cfg){
     if(!ev.length) corpo = vazio;
     else{
       const porCli = Array.from(agrupar(ev, x=>x.cliente||'Sem cliente informado').entries()).map(([c, lista])=>({c, r:somarEventos(lista)})).sort((a,b)=>b.r.total-a.r.total);
-      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados']])
+      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados'],[fmtMs(tot.w),'Tempo útil'],[fmtMs(tot.g),'Tempo perdido']])
       + `<div class="fx-sec">Produção por operador</div>${rpTabelaOperadores(ev)}
         <div class="fx-sec">Produção por cliente</div><div class="rp-wrap"><table class="rp-table">
-        <thead><tr><th>Cliente</th><th>Caixas</th><th>Preparações</th><th>Imagens capt.</th><th>Imagens insp.</th><th>Conjuntos</th><th>Total de etapas</th></tr></thead>
-        <tbody>${porCli.map(x=>`<tr><td><b>${escapeHtml(x.c)}</b></td><td>${x.r.nCaixas}</td><td>${x.r.prep}</td><td>${x.r.capQtd}</td><td>${x.r.insQtd}</td><td>${x.r.idxQtd}</td><td><b>${x.r.total}</b></td></tr>`).join('')}</tbody></table></div>`;
+        <thead><tr><th>Cliente</th><th>Caixas</th><th>Preparações</th><th>Imagens capt.</th><th>Imagens insp.</th><th>Conjuntos</th><th>Tempo útil</th><th>Tempo perdido</th><th>Total de etapas</th></tr></thead>
+        <tbody>${porCli.map(x=>`<tr><td><b>${escapeHtml(x.c)}</b></td><td>${x.r.nCaixas}</td><td>${x.r.prep}</td><td>${x.r.capQtd}</td><td>${x.r.insQtd}</td><td>${x.r.idxQtd}</td><td>${fmtMs(x.r.w)}</td><td>${fmtMs(x.r.g)}</td><td><b>${x.r.total}</b></td></tr>`).join('')}</tbody></table></div>`;
     }
   }
   return `
