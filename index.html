@@ -409,6 +409,18 @@
   .user-row .user-main{flex:1 1 220px; min-width:0;}
   .user-row .sub{color:var(--muted); font-size:12.5px;}
   .pill-off{background:var(--danger-soft); color:var(--danger);}
+  .etapas-check{display:flex; flex-wrap:wrap; gap:8px;}
+  .etapa-op{
+    display:flex; align-items:center; gap:8px; margin:0 !important; padding:9px 12px;
+    border:1.5px solid var(--line); border-radius:8px; background:#FBFDFC; cursor:pointer;
+    font-size:14px !important; font-weight:500 !important; color:var(--ink) !important;
+    text-transform:none !important; letter-spacing:0 !important;
+  }
+  .etapa-op input{width:auto !important; padding:0 !important; margin:0; accent-color:var(--jade);}
+  .etapa-op:has(input:checked){border-color:var(--jade); background:var(--jade-soft);}
+  .ativo-row{cursor:pointer;}
+  .ativo-row:hover{border-color:var(--jade);}
+  .ativo-row .obj-meta{min-width:96px;}
   .install-box{
     margin-top:18px; padding:12px 14px; border-radius:10px; background:var(--jade-soft);
     font-size:13px; color:var(--jade-dark); line-height:1.5;
@@ -717,6 +729,53 @@ let cacheObjetos = [];
 let cacheOperadores = [];
 
 const NOMES_ETAPA = ['Recebido','Preparação','Captura','Inspeção','Indexação','Pronto'];
+
+/* Etapas em que um operador pode trabalhar (marcadas no cadastro do usuário) */
+const ETAPAS_TRABALHO = [
+  {k:'preparacao', nome:'Preparação', espera:'novo',         ativo:'preparando'},
+  {k:'captura',    nome:'Captura',    espera:'preparado',    ativo:'capturando'},
+  {k:'inspecao',   nome:'Inspeção',   espera:'capturado',    ativo:'inspecionando'},
+  {k:'indexacao',  nome:'Indexação',  espera:'inspecionado', ativo:'indexando'}
+];
+/* Etapas liberadas para o operador logado (lidas do cadastro, sempre atualizado) */
+function etapasDoUsuario(){
+  if(!usuarioAtual) return [];
+  const u = cacheOperadores.find(o=>o.matricula===usuarioAtual.matricula);
+  return u && Array.isArray(u.etapas) ? u.etapas : [];
+}
+/* Lote que o operador está trabalhando agora (em qualquer etapa) */
+function loteEmAndamentoDoUsuario(matricula){
+  for(const o of cacheObjetos){
+    const et = ETAPAS_TRABALHO.find(e=>e.ativo===o.status);
+    if(et && o[et.k] && o[et.k].matricula===matricula && !o[et.k].fim) return {obj:o, etapa:et};
+  }
+  return null;
+}
+/* Etapas que aparecem no menu: as liberadas + a do lote que ele já está trabalhando (para poder finalizar) */
+function etapasVisiveisDoUsuario(){
+  const v = etapasDoUsuario().slice();
+  const a = usuarioAtual ? loteEmAndamentoDoUsuario(usuarioAtual.matricula) : null;
+  if(a && !v.includes(a.etapa.k)) v.push(a.etapa.k);
+  return v;
+}
+function aplicarMenuEtapas(){
+  const vis = etapasVisiveisDoUsuario();
+  ETAPAS_TRABALHO.forEach(e=>{
+    const b = document.querySelector('#tela-operador .navlink[data-etapa="'+e.k+'"]');
+    if(b) b.style.display = vis.includes(e.k) ? '' : 'none';
+  });
+}
+function etapasCheckboxesHTML(prefixo, marcadas){
+  return '<div class="etapas-check">' + ETAPAS_TRABALHO.map(e=>
+    `<label class="etapa-op"><input type="checkbox" id="${prefixo}-etapa-${e.k}" ${marcadas.includes(e.k)?'checked':''}> ${e.nome}</label>`
+  ).join('') + '</div>';
+}
+function lerEtapasMarcadas(prefixo){
+  return ETAPAS_TRABALHO.filter(e=>{ const c = document.getElementById(prefixo+'-etapa-'+e.k); return c && c.checked; }).map(e=>e.k);
+}
+function nomesEtapas(lista){
+  return ETAPAS_TRABALHO.filter(e=>(lista||[]).includes(e.k)).map(e=>e.nome).join(', ');
+}
 
 const INFO_STATUS = {
   novo:          {idx:1, fase:'espera',  label:'Aguardando preparação'},
@@ -1100,6 +1159,11 @@ async function atualizarContadores(){
 
 async function renderMainOperador(){
   await carregarObjetos();
+  await carregarOperadores();
+  aplicarMenuEtapas();
+  if(etapaAtualOperador!=='recebimento' && !etapasVisiveisDoUsuario().includes(etapaAtualOperador)){
+    irParaEtapa('recebimento'); return;
+  }
   await atualizarContadores();
   const main = document.getElementById('main-operador');
 
@@ -1373,7 +1437,10 @@ async function registrarCaixa(){
 }
 
 function telaEtapaOperador(cfg){
-  const disponiveis = cacheObjetos.filter(o=>o.status===cfg.statusEspera);
+  const permitido = etapasDoUsuario().includes(cfg.campo);
+  const atual = loteEmAndamentoDoUsuario(usuarioAtual.matricula);
+  const cfgCard = {...cfg, bloqueado: !!atual};
+  const disponiveis = permitido ? cacheObjetos.filter(o=>o.status===cfg.statusEspera) : [];
   const emAndamento = cacheObjetos.filter(o=>o.status===cfg.statusAtivo && o[cfg.campo] && o[cfg.campo].matricula===usuarioAtual.matricula);
   return `
     <div class="main-head">
@@ -1383,6 +1450,8 @@ function telaEtapaOperador(cfg){
       <input id="busca-${cfg.campo}" placeholder="Buscar por código..." oninput="filtrarLista('${cfg.campo}')">
     </div>
 
+    ${atual ? `<div class="modo-aviso">Você já está com o lote <b>${escapeHtml(atual.obj.codigo)}</b> em <b>${atual.etapa.nome}</b>. Finalize esse lote para poder puxar outro.</div>` : ''}
+    ${!permitido ? `<div class="modo-aviso">Você não está liberado para puxar lotes desta etapa. Fale com o gestor.</div>` : ''}
     <div class="section-title">Em andamento (${emAndamento.length})</div>
     <div class="card-list" id="lista-andamento-${cfg.campo}">
       ${emAndamento.length===0 ? '<div class="empty-state">Você não tem nenhum lote em andamento nesta etapa.</div>' :
@@ -1392,7 +1461,7 @@ function telaEtapaOperador(cfg){
     <div class="section-title">Disponíveis para puxar (${disponiveis.length})</div>
     <div class="card-list" id="lista-disponivel-${cfg.campo}">
       ${disponiveis.length===0 ? '<div class="empty-state">Nenhum lote aguardando nesta etapa no momento.</div>' :
-        disponiveis.map(o=>renderCardDisponivel(o, cfg)).join('')}
+        disponiveis.map(o=>renderCardDisponivel(o, cfgCard)).join('')}
     </div>
   `;
 }
@@ -1423,7 +1492,9 @@ function renderCardDisponivel(o, cfg){
       <span class="status-pill ${statusPillClass(o.status)}">${INFO_STATUS[o.status].label}</span>
       ${badgeInconformidade(o)}
       <div class="obj-actions">
-        <button class="btn btn-primary btn-sm" onclick="puxarLote('${escapeHtml(o.codigo)}','${cfg.campo}','${cfg.statusAtivo}')">Puxar</button>
+        ${cfg.bloqueado
+          ? `<button class="btn btn-outline btn-sm" disabled style="opacity:.5;cursor:not-allowed;" title="Finalize o lote em andamento para puxar outro">Puxar</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="puxarLote('${escapeHtml(o.codigo)}','${cfg.campo}','${cfg.statusAtivo}')">Puxar</button>`}
       </div>
       ${renderObsAnteriores(o, cfg.campo)}
     </div>`;
@@ -1458,6 +1529,22 @@ function filtrarLista(campo){
 
 async function puxarLote(codigo, campo, statusAtivo){
   await carregarObjetos();
+  await carregarOperadores();
+  if(!etapasDoUsuario().includes(campo)){
+    mostrarToast('Você não está liberado para esta etapa. Fale com o gestor.');
+    renderMainOperador(); return;
+  }
+  const emAnd = loteEmAndamentoDoUsuario(usuarioAtual.matricula);
+  if(emAnd){
+    mostrarToast(`Finalize o lote ${escapeHtml(emAnd.obj.codigo)} (${emAnd.etapa.nome}) antes de puxar outro.`);
+    renderMainOperador(); return;
+  }
+  const et = ETAPAS_TRABALHO.find(e=>e.k===campo);
+  const alvo = cacheObjetos.find(o=>o.codigo===codigo);
+  if(!et || !alvo || alvo.status!==et.espera){
+    mostrarToast('Este lote não está mais disponível.');
+    renderMainOperador(); return;
+  }
   const lista = cacheObjetos.map(o=>{
     if(o.codigo!==codigo) return o;
     const novo = {...o};
@@ -1585,6 +1672,30 @@ async function renderMainGestor(){
   else if(abaAtualGestor==='config') main.innerHTML = await telaConfigGestor();
 }
 
+function blocoOperadoresAtivos(){
+  const ativos = [];
+  cacheObjetos.forEach(o=>{
+    const et = ETAPAS_TRABALHO.find(e=>e.ativo===o.status);
+    const d = et && o[et.k];
+    if(d && d.operador && !d.fim) ativos.push({o, et, d});
+  });
+  ativos.sort((a,b)=> new Date(a.d.inicio) - new Date(b.d.inicio));
+  return `
+    <div class="section-title" style="margin-top:0;">Operadores trabalhando agora (${ativos.length})</div>
+    ${ativos.length===0 ? '<div class="empty-state" style="margin-bottom:26px;">Nenhum operador com caixa em andamento neste momento.</div>' :
+      `<div style="margin-bottom:26px;">` + ativos.map(({o,et,d})=>`
+      <div class="op-row user-row ativo-row" onclick="abrirDetalheObjeto('${escapeHtml(o.codigo)}')">
+        <div class="user-main">
+          <div class="nome">${escapeHtml(d.operador)}</div>
+          <div class="sub mono">${d.matricula ? 'Matrícula '+escapeHtml(d.matricula) : ''}</div>
+        </div>
+        <span class="obj-meta">Caixa<br><b class="mono">${escapeHtml(o.codigo)}</b></span>
+        <span class="status-pill pill-active">${INFO_STATUS[o.status].label}</span>
+        <span class="obj-meta">Início<br><b>${fmtDataCurta(d.inicio)} ${fmtHoraCurta(d.inicio)}</b></span>
+        <span class="obj-meta">Tempo na caixa<br><b>${fmtDur(d.inicio, null)}</b></span>
+      </div>`).join('') + `</div>`}
+  `;
+}
 async function telaPainelGestor(){
   const total = cacheObjetos.length;
   const prontos = cacheObjetos.filter(o=>o.status==='pronto').length;
@@ -1598,6 +1709,7 @@ async function telaPainelGestor(){
       <div class="stat-card"><div class="num">${aguardando}</div><div class="lbl">Aguardando etapa</div></div>
       <div class="stat-card"><div class="num">${prontos}</div><div class="lbl">Concluídas (pronto)</div></div>
     </div>
+    ${blocoOperadoresAtivos()}
     <div class="toolbar">
       <input id="busca-gestor" placeholder="Buscar por código..." oninput="renderTabelaGestor()">
       <button class="btn btn-primary btn-sm" onclick="abrirOpcoesRelatorio()">🖨 Relatório de produção</button>
@@ -1843,6 +1955,9 @@ function telaOperadoresGestor(){
           <input id="g-novo-op-funcao" placeholder="Ex: Captura" autocomplete="off"></div>
         <div class="full"><label>Perfil de acesso</label>
           <select id="g-novo-op-perfil"><option value="operador">Operador — vê somente o que ele mesmo está trabalhando</option><option value="gestor">Gestor — acompanha tudo em tempo real</option></select></div>
+        <div class="full"><label>Etapas em que o usuário trabalha</label>
+          ${etapasCheckboxesHTML('g-novo-op', [])}
+          <div class="hint" style="margin-top:6px;">O operador só enxerga e puxa caixas das etapas marcadas. Não se aplica a gestores.</div></div>
         <div><label>Login</label>
           <input id="g-novo-op-login" class="mono" placeholder="Ex: joao.pereira" autocapitalize="none" autocorrect="off" spellcheck="false" autocomplete="off"></div>
         <div><label>Senha</label>
@@ -1862,6 +1977,9 @@ function telaOperadoresGestor(){
             <div class="nome">${escapeHtml(o.nome)}</div>
             <div class="sub mono">${o.perfil==='gestor' ? 'Gestor' : 'Operador'} · Matrícula ${escapeHtml(o.matricula)}${o.funcao ? ' · '+escapeHtml(o.funcao) : ''}</div>
             <div class="sub mono">${o.login ? 'Login: '+escapeHtml(o.login) : 'Sem login definido — clique em Editar'}</div>
+            ${o.perfil==='gestor' ? '' : ((o.etapas||[]).length
+              ? `<div class="sub">Etapas: ${escapeHtml(nomesEtapas(o.etapas))}</div>`
+              : `<div class="sub" style="color:var(--danger);font-weight:600;">⚠ Nenhuma etapa marcada — este operador não vê nenhuma fila. Clique em Editar.</div>`)}
           </div>
           <span class="status-pill ${st.cls}">${st.txt}</span>
           <div class="obj-actions">
@@ -1880,15 +1998,17 @@ async function gestorCadastrarOperador(){
   const perfil = document.getElementById('g-novo-op-perfil').value === 'gestor' ? 'gestor' : 'operador';
   const login = document.getElementById('g-novo-op-login').value.trim().toLowerCase();
   const senha = document.getElementById('g-novo-op-senha').value;
+  const etapas = perfil==='gestor' ? [] : lerEtapasMarcadas('g-novo-op');
   const errEl = document.getElementById('g-err-operador');
   errEl.textContent = '';
   if(!nome || !matricula || !login || !senha){ errEl.textContent = 'Preencha nome, matrícula, login e senha.'; return; }
   if(!validarLogin(login)){ errEl.textContent = 'Login: 3 a 30 letras minúsculas, números, ponto, hífen ou sublinhado (sem espaços). O login "admin" é reservado.'; return; }
   if(senha.length < 4){ errEl.textContent = 'A senha precisa ter pelo menos 4 caracteres.'; return; }
+  if(perfil==='operador' && etapas.length===0){ errEl.textContent = 'Marque pelo menos uma etapa em que o operador trabalha.'; return; }
   await carregarOperadores();
   if(cacheOperadores.some(o=>o.matricula===matricula)){ errEl.textContent = 'Matrícula já cadastrada.'; return; }
   if(cacheOperadores.some(o=>o.login && o.login.toLowerCase()===login)){ errEl.textContent = 'Esse login já está em uso.'; return; }
-  const novo = {nome, matricula, funcao, perfil, login, ativo:true, criadoEm:nowISO()};
+  const novo = {nome, matricula, funcao, perfil, etapas, login, ativo:true, criadoEm:nowISO()};
   await definirSenha(novo, senha);
   if(await salvarOperadores([...cacheOperadores, novo])){
     mostrarToast('Usuário cadastrado.');
@@ -1909,6 +2029,9 @@ function gestorEditarOperador(matricula){
           <div><label>Função / setor</label><input id="ed-funcao" value="${escapeHtml(o.funcao||'')}"></div>
           <div class="full"><label>Perfil de acesso</label>
             <select id="ed-perfil"><option value="operador" ${o.perfil!=='gestor'?'selected':''}>Operador</option><option value="gestor" ${o.perfil==='gestor'?'selected':''}>Gestor</option></select></div>
+          <div class="full"><label>Etapas em que o usuário trabalha</label>
+            ${etapasCheckboxesHTML('ed', o.etapas||[])}
+            <div class="hint" style="margin-top:6px;">Não se aplica a gestores.</div></div>
           <div class="full"><label>Login</label><input id="ed-login" class="mono" value="${escapeHtml(o.login||'')}" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Ex: joao.pereira"></div>
           <div class="full"><label>${o.senhaHash ? 'Nova senha (deixe em branco para manter)' : 'Senha'}</label>
             <div class="pw-wrap"><input id="ed-senha" type="password" autocomplete="new-password" placeholder="Mínimo 4 caracteres">
@@ -1928,6 +2051,7 @@ async function gestorSalvarEdicao(matricula){
   const perfil = document.getElementById('ed-perfil').value === 'gestor' ? 'gestor' : 'operador';
   const login = document.getElementById('ed-login').value.trim().toLowerCase();
   const senha = document.getElementById('ed-senha').value;
+  const etapas = perfil==='gestor' ? [] : lerEtapasMarcadas('ed');
   const errEl = document.getElementById('ed-err');
   errEl.textContent = '';
   await carregarOperadores();
@@ -1937,9 +2061,10 @@ async function gestorSalvarEdicao(matricula){
   if(!login){ errEl.textContent = 'Informe o login.'; return; }
   if(!validarLogin(login)){ errEl.textContent = 'Login: 3 a 30 letras minúsculas, números, ponto, hífen ou sublinhado.'; return; }
   if(cacheOperadores.some(x=>x.matricula!==matricula && x.login && x.login.toLowerCase()===login)){ errEl.textContent = 'Esse login já está em uso.'; return; }
+  if(perfil==='operador' && etapas.length===0){ errEl.textContent = 'Marque pelo menos uma etapa em que o operador trabalha.'; return; }
   if(!o.senhaHash && !senha){ errEl.textContent = 'Defina uma senha para liberar o acesso.'; return; }
   if(senha && senha.length < 4){ errEl.textContent = 'A senha precisa ter pelo menos 4 caracteres.'; return; }
-  const novo = {...o, nome, funcao, perfil, login};
+  const novo = {...o, nome, funcao, perfil, etapas, login};
   if(novo.ativo === undefined) novo.ativo = true;
   if(senha) await definirSenha(novo, senha);
   if(await salvarOperadores(cacheOperadores.map(x=>x.matricula===matricula ? novo : x))){
@@ -2000,9 +2125,9 @@ async function limparTodosDados(){
 const _origRenderMainGestor = renderMainGestor;
 renderMainGestor = async function(){
   const salvos = {};
-  document.querySelectorAll('#main-gestor select[id], #main-gestor input[id]').forEach(e=>{ salvos[e.id] = e.value; });
+  document.querySelectorAll('#main-gestor select[id], #main-gestor input[id]').forEach(e=>{ salvos[e.id] = e.type==='checkbox' ? e.checked : e.value; });
   await _origRenderMainGestor();
-  Object.keys(salvos).forEach(id=>{ const e = document.getElementById(id); if(e && salvos[id]!=='') e.value = salvos[id]; });
+  Object.keys(salvos).forEach(id=>{ const e = document.getElementById(id); if(!e) return; if(e.type==='checkbox') e.checked = !!salvos[id]; else if(salvos[id]!=='') e.value = salvos[id]; });
   if(abaAtualGestor==='painel') renderTabelaGestor();
   if(abaAtualGestor==='producao') renderRelatorioProducao();
 };
@@ -2272,7 +2397,9 @@ function eventosProducao(f){
   cacheObjetos.forEach(o=>{
     const cli = ((o.ficha && o.ficha.cliente) || '').trim();
     if(f.cliente && cli.toLowerCase() !== f.cliente.toLowerCase()) return;
+    if(f.codigo && o.codigo !== f.codigo) return;
     ETAPAS_REL.forEach(e=>{
+      if(f.etapa && f.etapa !== e.k) return;
       const d = o[e.k];
       if(!d || !d.fim) return;
       const dt = new Date(d.fim);
@@ -2309,6 +2436,26 @@ function textoPeriodo(mes, ano){
   if(ano) return 'Ano de '+ano;
   return 'Todo o período';
 }
+function msEvento(x){ return x.inicio && x.fim ? Math.max(0, new Date(x.fim) - new Date(x.inicio)) : null; }
+function mediaMs(lista){
+  const v = lista.map(msEvento).filter(n=>n!==null);
+  return v.length ? v.reduce((a,b)=>a+b,0)/v.length : null;
+}
+function fmtMs(ms){
+  if(ms===null || ms===undefined) return '—';
+  let s = Math.floor(ms/1000);
+  const h = Math.floor(s/3600); s -= h*3600;
+  const m = Math.floor(s/60); s -= m*60;
+  return (h?h+'h ':'') + (m?m+'min':(h?'':s+'s'));
+}
+function rpLabelQtd(k){ return k==='indexacao' ? 'Conjuntos indexados' : 'Imagens'; }
+function rpDetalheEventos(lista){
+  const l = lista.slice().sort((a,b)=>new Date(a.fim)-new Date(b.fim));
+  return `<div class="rp-wrap"><table class="rp-table">
+    <thead><tr><th>Data</th><th>Caixa</th><th>Cliente</th><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Duração</th><th>Quantidade</th></tr></thead>
+    <tbody>${l.map(x=>`<tr><td>${fmtDataCurta(x.fim)}</td><td class="mono">${escapeHtml(x.codigo)}</td><td>${escapeHtml(x.cliente||'—')}</td><td>${x.etapa}</td><td>${escapeHtml(x.operador)}</td>
+      <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtDur(x.inicio, x.fim) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+}
 function rpStats(itens){
   return `<div class="rp-stats">${itens.map(i=>`<div class="rp-stat"><div class="n">${i[0]}</div><div class="l">${i[1]}</div></div>`).join('')}</div>`;
 }
@@ -2329,8 +2476,9 @@ function rpTabelaOperadores(ev){
 function relatorioHTML(cfg){
   const ev = eventosProducao(cfg);
   const logo = (document.querySelector('.brand-mark img')||{}).src || '';
-  const per = textoPeriodo(cfg.mes, cfg.ano);
+  const per = cfg.tipo==='objeto' ? 'Histórico completo' : textoPeriodo(cfg.mes, cfg.ano);
   let titulo, sub, corpo = '';
+  let nota = 'Considera etapas concluídas no período.';
   const tot = somarEventos(ev);
   const vazio = '<div class="rp-vazio">Nenhum registro de produção para os filtros escolhidos.</div>';
 
@@ -2347,6 +2495,59 @@ function relatorioHTML(cfg){
         <tbody>${lista.map(x=>`<tr><td>${fmtDataCurta(x.fim)}</td><td class="mono">${escapeHtml(x.codigo)}</td><td>${escapeHtml(x.cliente||'—')}</td><td>${x.etapa}</td>
           <td>${fmtHoraCurta(x.inicio)}</td><td>${fmtHoraCurta(x.fim)}</td><td>${x.inicio ? fmtDur(x.inicio, x.fim) : '—'}</td><td>${x.qtd!==null ? x.qtd+' '+x.ql : '—'}</td></tr>`).join('')}</tbody></table></div>`;
     }
+  }else if(cfg.tipo==='setor'){
+    const et = ETAPAS_REL.find(e=>e.k===cfg.etapa);
+    titulo = 'Relatório de produção por setor';
+    sub = et ? 'Setor: '+et.nome : 'Todos os setores — comparativo';
+    if(!ev.length) corpo = vazio;
+    else if(et){
+      const temQ = !!et.q, qlab = rpLabelQtd(et.k);
+      const linhas = Array.from(agrupar(ev, x=>x.matricula||x.operador).entries()).map(([mat, lista])=>{
+        const u = cacheOperadores.find(o=>o.matricula===mat);
+        return {nome: u ? u.nome : lista[0].operador, mat, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size,
+                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+      }).sort((a,b)=>b.n-a.n);
+      const totQtd = ev.reduce((a,x)=>a+(x.qtd||0),0);
+      corpo = rpStats([[ev.length,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[temQ?totQtd:'—', temQ?qlab:'Quantidade'],[fmtMs(mediaMs(ev)),'Tempo médio por caixa'],[linhas.length,'Operadores']])
+      + `<div class="fx-sec">Produção por operador — ${et.nome}</div><div class="rp-wrap"><table class="rp-table">
+        <thead><tr><th>Operador</th><th>Etapas concluídas</th><th>Caixas</th>${temQ?`<th>${qlab}</th>`:''}<th>Tempo médio</th></tr></thead>
+        <tbody>${linhas.map(l=>`<tr><td><b>${escapeHtml(l.nome)}</b><br><span class="mono rp-mut">${escapeHtml(l.mat)}</span></td><td>${l.n}</td><td>${l.caixas}</td>${temQ?`<td>${l.qtd}</td>`:''}<td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr><td>Total</td><td>${ev.length}</td><td>${tot.nCaixas}</td>${temQ?`<td>${totQtd}</td>`:''}<td>${fmtMs(mediaMs(ev))}</td></tr></tfoot></table></div>
+        <div class="fx-sec">Detalhamento</div>${rpDetalheEventos(ev)}`;
+    }else{
+      const linhas = ETAPAS_REL.map(e=>{
+        const lista = ev.filter(x=>x.k===e.k);
+        return {e, n:lista.length, caixas:new Set(lista.map(x=>x.codigo)).size, ops:new Set(lista.map(x=>x.matricula||x.operador)).size,
+                qtd:lista.reduce((a,x)=>a+(x.qtd||0),0), media:mediaMs(lista)};
+      });
+      corpo = rpStats([[tot.total,'Etapas concluídas'],[tot.nCaixas,'Caixas trabalhadas'],[tot.capQtd,'Imagens capturadas'],[tot.insQtd,'Imagens inspecionadas'],[tot.idxQtd,'Conjuntos indexados']])
+      + `<div class="fx-sec">Comparativo entre setores</div><div class="rp-wrap"><table class="rp-table">
+        <thead><tr><th>Setor</th><th>Etapas concluídas</th><th>Caixas</th><th>Operadores</th><th>Quantidade</th><th>Tempo médio</th></tr></thead>
+        <tbody>${linhas.map(l=>`<tr><td><b>${l.e.nome}</b></td><td>${l.n}</td><td>${l.caixas}</td><td>${l.ops}</td><td>${l.e.q ? l.qtd+' '+l.e.ql : '—'}</td><td>${fmtMs(l.media)}</td></tr>`).join('')}</tbody></table></div>`;
+    }
+  }else if(cfg.tipo==='objeto'){
+    const o = cacheObjetos.find(x=>x.codigo===cfg.codigo) || {};
+    const fc = o.ficha || {};
+    const cli = (fc.cliente||'').trim();
+    titulo = 'Relatório por objeto (caixa)';
+    sub = 'Caixa '+cfg.codigo+(cli ? ' · '+cli : '');
+    nota = 'Mostra todas as etapas já iniciadas, inclusive as em andamento.';
+    const linhas = ETAPAS_REL.map(e=>({e, d:o[e.k]||{}})).filter(x=>x.d.inicio);
+    const concl = linhas.filter(x=>x.d.fim);
+    const msTotal = concl.reduce((a,x)=>a+Math.max(0,new Date(x.d.fim)-new Date(x.d.inicio)),0);
+    const soma = k=>concl.filter(x=>x.e.k===k).reduce((a,x)=>a+(x.d[x.e.q]||0),0);
+    const dh = iso=> iso ? fmtDataCurta(iso)+' '+fmtHoraCurta(iso) : '—';
+    corpo = rpStats([[o.status && INFO_STATUS[o.status] ? INFO_STATUS[o.status].label : '—','Situação atual'],[concl.length,'Etapas concluídas'],[soma('captura'),'Imagens capturadas'],[soma('inspecao'),'Imagens inspecionadas'],[soma('indexacao'),'Conjuntos indexados']])
+    + `<div class="fx-sec">Identificação</div><div class="rp-wrap"><table class="rp-table">
+        <thead><tr><th>Cliente</th><th>Tipo de documento</th><th>Descrição</th><th>Recebida em</th><th>Tempo total trabalhado</th></tr></thead>
+        <tbody><tr><td>${escapeHtml(cli||'—')}</td><td>${escapeHtml(fc.tipoDocumento||'—')}</td><td>${escapeHtml(fc.descricao||'—')}</td><td>${dh(o.criadoEm)}</td><td>${concl.length ? fmtMs(msTotal) : '—'}</td></tr></tbody></table></div>
+      <div class="fx-sec">Etapas</div>`
+    + (linhas.length ? `<div class="rp-wrap"><table class="rp-table">
+        <thead><tr><th>Etapa</th><th>Operador</th><th>Início</th><th>Término</th><th>Duração</th><th>Quantidade</th><th>Replace</th><th>Situação</th><th>Observação</th></tr></thead>
+        <tbody>${linhas.map(({e,d})=>`<tr><td><b>${e.nome}</b></td><td>${escapeHtml(d.operador||'—')}</td><td>${dh(d.inicio)}</td><td>${dh(d.fim)}</td>
+          <td>${fmtDur(d.inicio, d.fim||null)}</td><td>${e.q ? (d[e.q]!=null ? d[e.q]+' '+e.ql : '—') : '—'}</td><td>${e.k==='inspecao' && d.qtdReplace!=null ? d.qtdReplace : '—'}</td>
+          <td>${d.fim ? 'Concluída' : 'Em andamento'}</td><td>${escapeHtml(d.observacao||'—')}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="rp-vazio">Esta caixa ainda não passou por nenhuma etapa de produção.</div>');
   }else if(cfg.tipo==='cliente'){
     titulo = 'Relatório de produção por cliente';
     sub = 'Cliente: '+cfg.cliente;
@@ -2392,7 +2593,7 @@ function relatorioHTML(cfg){
       <div class="fx-id"><span class="fx-chip">${escapeHtml(per)}</span><div class="fx-form">CEPE · Controle de Produção</div></div>
     </div>
     <div class="fx-body">${corpo}
-      <div class="fx-foot"><span>Considera etapas concluídas no período.</span><span>Emitido em ${new Date().toLocaleString('pt-BR')} por ${escapeHtml(usuarioAtual ? usuarioAtual.nome : '')}</span></div>
+      <div class="fx-foot"><span>${nota}</span><span>Emitido em ${new Date().toLocaleString('pt-BR')} por ${escapeHtml(usuarioAtual ? usuarioAtual.nome : '')}</span></div>
     </div>
   </div></div>`;
 }
@@ -2411,6 +2612,8 @@ function abrirOpcoesRelatorio(){
           <option value="geral">Geral — todo o grupo</option>
           <option value="individual" ${opSel?'selected':''}>Individual — um operador</option>
           <option value="cliente">Por cliente</option>
+          <option value="setor">Por setor (etapa)</option>
+          <option value="objeto">Por objeto (caixa)</option>
         </select>
         <div id="rel-box-op" class="${opSel?'':'hidden'}">
           <label>Operador</label>
@@ -2421,7 +2624,17 @@ function abrirOpcoesRelatorio(){
           ${clientes.length ? `<select id="rel-cli">${clientes.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>`
             : `<div class="hint">Nenhum cliente informado ainda. Preencha o campo <b>Cliente</b> na ficha de digitalização das caixas.</div><select id="rel-cli" class="hidden"></select>`}
         </div>
-        <div class="form-grid">
+        <div id="rel-box-setor" class="hidden">
+          <label>Setor</label>
+          <select id="rel-setor"><option value="">Todos os setores (comparativo)</option>${ETAPAS_REL.map(e=>`<option value="${e.k}">${e.nome}</option>`).join('')}</select>
+        </div>
+        <div id="rel-box-obj" class="hidden">
+          <label>Código da caixa</label>
+          <input id="rel-obj" list="rel-obj-lista" placeholder="Digite ou escolha o código" autocomplete="off">
+          <datalist id="rel-obj-lista">${cacheObjetos.map(o=>`<option value="${escapeHtml(o.codigo)}"></option>`).join('')}</datalist>
+          <div class="hint">O relatório da caixa mostra todo o histórico dela, sem filtro de mês e ano.</div>
+        </div>
+        <div class="form-grid" id="rel-box-per">
           <div><label>Mês</label><select id="rel-mes"><option value="">Todos</option>${NOMES_MES.map((m,i)=>`<option value="${i+1}" ${String(i+1)===mesSel?'selected':''}>${m}</option>`).join('')}</select></div>
           <div><label>Ano</label><select id="rel-ano"><option value="">Todos</option>${anos.map(a=>`<option value="${a}" ${String(a)===anoSel?'selected':''}>${a}</option>`).join('')}</select></div>
         </div>
@@ -2437,14 +2650,27 @@ function relAtualizarCampos(){
   const t = document.getElementById('rel-tipo').value;
   document.getElementById('rel-box-op').classList.toggle('hidden', t!=='individual');
   document.getElementById('rel-box-cli').classList.toggle('hidden', t!=='cliente');
+  document.getElementById('rel-box-setor').classList.toggle('hidden', t!=='setor');
+  document.getElementById('rel-box-obj').classList.toggle('hidden', t!=='objeto');
+  document.getElementById('rel-box-per').classList.toggle('hidden', t==='objeto');
 }
 async function gerarRelatorio(){
   const tipo = document.getElementById('rel-tipo').value;
-  const cfg = {tipo, mes:document.getElementById('rel-mes').value, ano:document.getElementById('rel-ano').value, matricula:'', cliente:''};
+  const cfg = {tipo, mes:document.getElementById('rel-mes').value, ano:document.getElementById('rel-ano').value, matricula:'', cliente:'', etapa:'', codigo:''};
   const errEl = document.getElementById('rel-err');
   if(tipo==='individual'){ cfg.matricula = (document.getElementById('rel-op')||{}).value || ''; if(!cfg.matricula){ errEl.textContent = 'Escolha um operador.'; return; } }
   if(tipo==='cliente'){ cfg.cliente = (document.getElementById('rel-cli')||{}).value || ''; if(!cfg.cliente){ errEl.textContent = 'Nenhum cliente disponível. Informe o cliente na ficha das caixas.'; return; } }
+  if(tipo==='setor') cfg.etapa = (document.getElementById('rel-setor')||{}).value || '';
+  if(tipo==='objeto'){
+    cfg.codigo = ((document.getElementById('rel-obj')||{}).value || '').trim(); cfg.mes = ''; cfg.ano = '';
+    if(!cfg.codigo){ errEl.textContent = 'Informe o código da caixa.'; return; }
+  }
   await carregarObjetos(); await carregarOperadores();
+  if(tipo==='objeto'){
+    const ach = cacheObjetos.find(o=>o.codigo.toLowerCase()===cfg.codigo.toLowerCase());
+    if(!ach){ errEl.textContent = 'Caixa não encontrada. Confira o código.'; return; }
+    cfg.codigo = ach.codigo;
+  }
   fecharModal();
   const root = document.getElementById('ficha-root');
   root.innerHTML = relatorioHTML(cfg);
