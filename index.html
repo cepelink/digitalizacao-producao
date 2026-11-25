@@ -2022,7 +2022,7 @@ function telaProducaoOperador(){
       <select id="filtro-prod-os" onchange="renderRelatorioProducao()" title="Período da produção">${opcoesOS.replace(`value="${padrao}"`, `value="${padrao}" selected`)}</select>
       <select id="filtro-prod-operador" onchange="renderRelatorioProducao()">
         <option value="">Todos os operadores</option>
-        ${cacheOperadores.map(o=>`<option value="${escapeHtml(o.matricula)}">${escapeHtml(o.nome)} — ${escapeHtml(o.matricula)}</option>`).join('')}
+        ${cacheOperadores.filter(o=>o.perfil!=='gestor').map(o=>`<option value="${escapeHtml(o.matricula)}">${escapeHtml(o.nome)} — ${escapeHtml(o.matricula)}</option>`).join('')}
       </select>
       <select id="filtro-prod-mes" onchange="renderRelatorioProducao()" ${dis}>
         <option value="">Todos os meses</option>
@@ -2048,10 +2048,11 @@ function dadosProducaoAtual(){
   let resumo, congelado = false;
   if(os && os.fim && os.relatorio){ resumo = os.relatorio; congelado = true; }
   else resumo = resumirEventos(eventosProducao(os ? {de:os.ini, ate:os.fim||0} : {mes, ano}));
-  let linhas = resumo.operadores.filter(l=>!matFiltro || l.mat===matFiltro);
+  const ehGestor = mat => cacheOperadores.some(o=>o.matricula===mat && o.perfil==='gestor');   /* gestor não faz produção: não aparece na tabela */
+  let linhas = resumo.operadores.filter(l=>(!matFiltro || l.mat===matFiltro) && !ehGestor(l.mat));
   if(!congelado){   /* mostra também quem ainda não produziu, como antes */
     const tem = new Set(linhas.map(l=>l.mat));
-    cacheOperadores.filter(o=>(!matFiltro || o.matricula===matFiltro) && !tem.has(o.matricula))
+    cacheOperadores.filter(o=>o.perfil!=='gestor' && (!matFiltro || o.matricula===matFiltro) && !tem.has(o.matricula))
       .forEach(o=>linhas.push({nome:o.nome, mat:o.matricula, prep:0, cap:0, capQtd:0, ins:0, insQtd:0, idx:0, idxQtd:0, w:0, g:0, total:0}));
   }
   return {os, resumo, congelado, linhas, matFiltro, mes, ano};
