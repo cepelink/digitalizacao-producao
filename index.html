@@ -1984,7 +1984,11 @@ async function carregarOS(){
 const ehContaGestor = o => !!o && (o.perfil==='gestor' || o.admin===true);
 const osAberta = ()=> cacheOS.find(o=>!o.fim) || null;
 const fmtDataBR = t => { const d = new Date(t); return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); };
-function osPorValor(v){ return v==='atual' ? osAberta() : (v && v!=='livre' ? cacheOS.find(o=>o.id===v) : null) || null; }
+function osPorValor(v){
+  if(v==='mes'){ const d = new Date(), y = d.getFullYear(), m = d.getMonth();
+    return {id:'mes', mes:true, nome:'Mês atual ('+String(m+1).padStart(2,'0')+'/'+y+')', ini:new Date(y,m,1).getTime(), fim:new Date(y,m+1,1).getTime()}; }
+  return v==='atual' ? osAberta() : (v && v!=='livre' ? cacheOS.find(o=>o.id===v) : null) || null;
+}
 
 function resumirEventos(ev){
   const ops = new Map(), cls = new Map(), caixas = new Set();
@@ -2013,9 +2017,11 @@ function resumirEventos(ev){
 function telaProducaoOperador(){
   const anos = anosDisponiveis();
   const ab = osAberta(), finais = cacheOS.filter(o=>o.fim).sort((a,b)=>b.ini-a.ini);
-  const padrao = ab ? 'atual' : 'livre';
+  const padrao = ab ? 'atual' : 'mes';
+  const hoje = new Date(), rotMes = String(hoje.getMonth()+1).padStart(2,'0')+'/'+hoje.getFullYear();
   const opcoesOS = (ab ? `<option value="atual">OS atual — ${escapeHtml(ab.nome)} (desde ${fmtDataBR(ab.ini)})</option>` : '')
     + finais.map(o=>`<option value="${escapeHtml(o.id)}">${escapeHtml(o.nome)} · ${fmtDataBR(o.ini)} a ${fmtDataBR(o.fim-1)}${o.relatorio?' · relatório salvo':''}</option>`).join('')
+    + `<option value="mes">Mês atual — ${rotMes}</option>`
     + `<option value="livre">Sem OS — filtrar por mês e ano</option>`;
   const dis = padrao==='livre' ? '' : 'disabled';
   return `
@@ -2026,12 +2032,11 @@ function telaProducaoOperador(){
         <option value="">Todos os operadores</option>
         ${cacheOperadores.filter(o=>!ehContaGestor(o)).map(o=>`<option value="${escapeHtml(o.matricula)}">${escapeHtml(o.nome)} — ${escapeHtml(o.matricula)}</option>`).join('')}
       </select>
+      <select id="filtro-prod-objeto" onchange="objProdSel=this.value; renderRelatorioProducao()" title="Objetos (caixas) produzidos"><option value="">Todos os objetos</option></select>
       <select id="filtro-prod-cliente" onchange="renderRelatorioProducao()" title="Cliente">
         <option value="">Todos os clientes</option>
         ${[...new Set(cacheObjetos.map(o=>((o.ficha&&o.ficha.cliente)||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR')).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
       </select>
-      <input type="search" id="filtro-prod-objeto" list="lista-prod-objetos" placeholder="Objeto (caixa)" oninput="renderRelatorioProducao()" title="Código do objeto/caixa" style="min-width:150px;">
-      <datalist id="lista-prod-objetos">${cacheObjetos.map(o=>`<option value="${escapeHtml(o.codigo)}"></option>`).join('')}</datalist>
       <button class="btn btn-ghost btn-sm" onclick="limparFiltrosProducao()">Limpar filtros</button>
       <select id="filtro-prod-mes" onchange="renderRelatorioProducao()" ${dis}>
         <option value="">Todos os meses</option>
@@ -2050,22 +2055,35 @@ function telaProducaoOperador(){
 }
 
 function limparFiltrosProducao(){
-  ['filtro-prod-operador','filtro-prod-cliente','filtro-prod-objeto'].forEach(id=>{ const e = document.getElementById(id); if(e) e.value = ''; });
+  objProdSel = '';
+  ['filtro-prod-operador','filtro-prod-cliente'].forEach(id=>{ const e = document.getElementById(id); if(e) e.value = ''; });
   renderRelatorioProducao();
 }
-let ultimaProducao = null;
+let ultimaProducao = null, objProdSel = '';
+/* Lista de objetos (caixas) que aparecem no filtro: todos os que tiveram produção no período, do cliente e do operador escolhidos */
+function atualizarObjetosProducao(){
+  const sel = document.getElementById('filtro-prod-objeto'); if(!sel) return;
+  const os = osPorValor(document.getElementById('filtro-prod-os').value);
+  const cli = document.getElementById('filtro-prod-cliente').value, mat = document.getElementById('filtro-prod-operador').value;
+  const mes = document.getElementById('filtro-prod-mes').value, ano = document.getElementById('filtro-prod-ano').value;
+  const ev = eventosProducao(Object.assign(os ? {de:os.ini, ate:os.fim||0} : {mes, ano}, cli ? {cliente:cli} : {}, mat ? {matricula:mat} : {}));
+  const m = new Map(); ev.forEach(x=>{ const r = m.get(x.codigo) || {n:0, cli:x.cliente}; r.n++; m.set(x.codigo, r); });
+  const lista = [...m.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),'pt-BR',{numeric:true}));
+  if(objProdSel && !m.has(objProdSel)) objProdSel = '';
+  sel.innerHTML = `<option value="">Todos os objetos (${lista.length})</option>` + lista.map(([c,r])=>`<option value="${escapeHtml(c)}" ${c===objProdSel?'selected':''}>${escapeHtml(c)}${r.cli?' · '+escapeHtml(r.cli):''} · ${r.n} etapa${r.n>1?'s':''}</option>`).join('');
+}
 function dadosProducaoAtual(){
   const matFiltro = document.getElementById('filtro-prod-operador').value;
   const mes = document.getElementById('filtro-prod-mes').value, ano = document.getElementById('filtro-prod-ano').value;
   const os = osPorValor(document.getElementById('filtro-prod-os').value);
   const cli = document.getElementById('filtro-prod-cliente').value;
-  const obj = (document.getElementById('filtro-prod-objeto').value||'').trim();
+  const obj = objProdSel;
   const filtrado = !!(cli || obj);   /* com cliente/objeto o relatório congelado não serve: recalcula */
   let resumo, congelado = false;
   if(os && os.fim && os.relatorio && !filtrado){ resumo = os.relatorio; congelado = true; }
   else {
     let ev = eventosProducao(Object.assign(os ? {de:os.ini, ate:os.fim||0} : {mes, ano}, cli ? {cliente:cli} : {}));
-    if(obj) ev = ev.filter(x=>String(x.codigo).toLowerCase().includes(obj.toLowerCase()));
+    if(obj) ev = ev.filter(x=>String(x.codigo)===obj);
     resumo = resumirEventos(ev);
   }
   const ehGestor = mat => cacheOperadores.some(o=>o.matricula===mat && ehContaGestor(o));
@@ -2082,6 +2100,7 @@ function renderRelatorioProducao(){
   if(!container) return;
   const selOS = document.getElementById('filtro-prod-os').value;
   ['filtro-prod-mes','filtro-prod-ano'].forEach(id=>{ const e = document.getElementById(id); if(e) e.disabled = selOS!=='livre'; });
+  atualizarObjetosProducao();
   if(cacheOperadores.length===0 && !cacheOS.length){ container.innerHTML = '<div class="empty-state">Nenhum operador cadastrado.</div>'; return; }
   const d = dadosProducaoAtual(); ultimaProducao = d;
   const info = document.getElementById('info-prod-os');
@@ -2089,7 +2108,7 @@ function renderRelatorioProducao(){
     if(d.os){
       const ab = !d.os.fim, dia = ab ? Math.floor((Date.now()-d.os.ini)/864e5)+1 : 0;
       info.innerHTML = `<div class="obj-card" style="flex-direction:column;align-items:flex-start;gap:2px;margin-bottom:14px;">
-        <div><b>${escapeHtml(d.os.nome)}</b> · <span class="pill ${ab?'pill-active':'pill-done'}">${ab?'OS aberta':'OS finalizada'}</span></div>
+        <div><b>${escapeHtml(d.os.nome)}</b> · <span class="pill ${ab?'pill-active':'pill-done'}">${d.os.mes?'Mês atual':ab?'OS aberta':'OS finalizada'}</span></div>
         <div style="color:var(--muted);font-size:13px;">${fmtDataBR(d.os.ini)} ${ab ? '→ em andamento · dia '+dia+' de produção' : 'a '+fmtDataBR(d.os.fim-1)}${d.congelado ? ' · 🔒 relatório salvo em '+new Date(d.os.relatorio.geradoEm).toLocaleString('pt-BR') : ''}${(d.cli||d.obj) ? ' · filtro: '+[d.cli&&'cliente '+escapeHtml(d.cli), d.obj&&'objeto '+escapeHtml(d.obj)].filter(Boolean).join(', ')+' (calculado ao vivo)' : ''}</div></div>`;
     }else info.innerHTML = (d.cli||d.obj) ? `<div class="hint" style="margin-bottom:12px;">Filtro: ${[d.cli&&'cliente '+escapeHtml(d.cli), d.obj&&'objeto '+escapeHtml(d.obj)].filter(Boolean).join(', ')}</div>` : '';
   }
